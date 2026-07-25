@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stroummeeschter"
+version = "0.1.0"
+description = "Streams readings from a SlimmeLezer (ESPHome P1 reader) into SQLite"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "matplotlib>=3.8",
+    "tzdata>=2024.1",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+stroummeeschter-import-slimmelezer = "stroummeeschter.cli:main"
+stroummeeschter-import-envoy = "stroummeeschter.envoy_cli:main"
+stroummeeschter-chart = "stroummeeschter.chart_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+stroummeeschter = ["migrations/*.sql"]

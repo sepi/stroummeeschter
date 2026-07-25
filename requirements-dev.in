@@ -1,0 +1,5 @@
+-c requirements.txt
+-r requirements.in
+pytest
+build
+pip-tools

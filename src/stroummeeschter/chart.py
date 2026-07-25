@@ -1,0 +1,294 @@
+"""Renders a PNG power chart - reused both for the live web view and for
+printing on the thermal printer (fetched by URL, so parameters come in as
+plain query strings: hours/width/height)."""
+
+from __future__ import annotations
+
+import io
+import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import matplotlib
+
+matplotlib.use("Agg")  # headless: no display, just render to a buffer
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from stroummeeschter.aggregates import energy_totals
+
+ENTITY_IMPORT_W = "sensor-power_consumed"
+ENTITY_EXPORT_W = "sensor-power_produced"
+ENTITY_PRODUCTION_W = "envoy-production_w"
+
+# Everything is stored as UTC; charts display in local time so a "daily"
+# window (see chart_cli.day_window) reads as an actual local calendar day.
+LOCAL_TZ = ZoneInfo("Europe/Luxembourg")
+
+PHASES = (1, 2, 3)
+PHASE_LINESTYLES = {1: "-", 2: "--", 3: "-."}
+
+# All signals get resampled onto one regular grid at this resolution -
+# roughly the SlimmeLezer's own native cadence, so plotting doesn't invent
+# precision the data doesn't have. A shared regular index is also what
+# makes plain Series arithmetic between differently-sourced signals safe
+# (production_w - export_w, etc.) without manual zip/list-comprehension.
+RESAMPLE_FREQ = "10s"
+
+# Forward-fill holds the last known value between updates - necessary since
+# Envoy (~60s cadence) and the SlimmeLezer (~10-15s) don't share timestamps.
+# But if a source stops updating entirely (a stalled process, not just its
+# normal polling gap), holding the last value forever silently fabricates
+# data - it happened for real: a 32-minute logger stall rendered as a flat
+# "current" line, which made a derived signal look like it was tracking a
+# real trend it wasn't. Past this gap, show a break (NaN) instead.
+MAX_GAP = pd.Timedelta(minutes=5)
+
+# A signal combining multiple sources (Consumption, self-consumption %) is
+# only as fresh as its slowest input. Envoy updates far less often than the
+# SlimmeLezer, so holding its value for the full MAX_GAP just to keep a
+# derived line "continuous" quietly stretches one real reading across many
+# grid points that don't actually have fresh data - a milder, everyday
+# version of the same fabrication MAX_GAP exists to prevent. Derived signals
+# use this much tighter tolerance instead: only render where production is
+# genuinely current, not merely "not yet timed out".
+#
+# 60s, not 20s: measured against real data, consecutive envoy-production_w
+# readings have gaps averaging ~18s but ranging up to 46s under completely
+# normal operation (network/processing jitter, not outages) - a 20s cutoff
+# was cutting ~30% of readings that were actually fine, producing constant
+# holes in Consumption with no real cause. 60s gives margin above the
+# observed max without falling back to full outage-level tolerance.
+DERIVED_MAX_GAP = pd.Timedelta(seconds=60)
+
+
+def _fmt_kwh(wh: float | None) -> str:
+    return f"{wh / 1000:.2f} kWh" if wh is not None else "n/a"
+
+
+def _fmt_pct(fraction: float | None) -> str:
+    return f"{fraction * 100:.0f}%" if fraction is not None else "n/a"
+
+
+def _time_grid(since: str, until: str) -> pd.DatetimeIndex:
+    return pd.date_range(start=pd.Timestamp(since), end=pd.Timestamp(until), freq=RESAMPLE_FREQ, inclusive="left")
+
+
+def _fetch_series(conn: sqlite3.Connection, entity_id: str, since: str, until: str) -> pd.Series:
+    rows = conn.execute(
+        """
+        SELECT recorded_at, value FROM readings
+        WHERE entity_id = ? AND recorded_at >= ? AND recorded_at < ? AND value IS NOT NULL
+        ORDER BY recorded_at
+        """,
+        (entity_id, since, until),
+    ).fetchall()
+    if not rows:
+        return pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+    index = pd.to_datetime([r[0] for r in rows], utc=True)
+    return pd.Series([r[1] for r in rows], index=index)
+
+
+def _resample(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    since: str,
+    until: str,
+    grid: pd.DatetimeIndex,
+    max_gap: pd.Timedelta = MAX_GAP,
+) -> pd.Series:
+    """Fetch `entity_id` and forward-fill it onto `grid`, breaking (NaN) past
+    `max_gap` - see the module-level comment on why a real gap must never
+    render as a flat hold."""
+    series = _fetch_series(conn, entity_id, since, until)
+    return series.reindex(grid, method="ffill", tolerance=max_gap)
+
+
+def _phase_exporting_shares(conn: sqlite3.Connection, since: str, until: str) -> dict[int, float | None]:
+    grid = _time_grid(since, until)
+    shares = {}
+    for p in PHASES:
+        consumed_w = _resample(conn, f"sensor-power_consumed_phase_{p}", since, until, grid)
+        produced_w = _resample(conn, f"sensor-power_produced_phase_{p}", since, until, grid)
+        net_w = (produced_w - consumed_w).dropna()
+        shares[p] = float((net_w > 0).mean()) if len(net_w) else None
+    return shares
+
+
+def render_power_chart(
+    conn: sqlite3.Connection,
+    since: str,
+    until: str,
+    totals_since: str | None = None,
+    totals_until: str | None = None,
+    assume_netting: bool = False,
+    width_px: int = 1600,
+    height_px: int = 400,
+    dpi: int = 100,
+) -> bytes:
+    """Plots [since, until), but the title's aggregates always cover
+    [totals_since, totals_until) - which defaults to [since, until) but is
+    meant to be passed the current calendar day regardless of what's being
+    plotted, so "today's totals" stays meaningful even when zoomed into a
+    shorter window (see chart_cli.write_chart)."""
+    totals_since = totals_since or since
+    totals_until = totals_until or until
+
+    grid = _time_grid(since, until)
+    import_w = _resample(conn, ENTITY_IMPORT_W, since, until, grid)
+    export_w = _resample(conn, ENTITY_EXPORT_W, since, until, grid)
+    production_w = _resample(conn, ENTITY_PRODUCTION_W, since, until, grid)
+    # Tighter tolerance specifically for combining into derived signals below
+    # - see DERIVED_MAX_GAP. production_w (the loose version) is still what
+    # gets displayed as the raw Production line.
+    production_w_fresh = _resample(conn, ENTITY_PRODUCTION_W, since, until, grid, max_gap=DERIVED_MAX_GAP)
+
+    # consumption = production + import - export (energy balance at any instant);
+    # plotted positive, alongside Production, so a surplus/deficit shows up
+    # directly as which line is on top - no sign-reading required.
+    consumption_w = production_w_fresh + import_w - export_w
+
+    if assume_netting:
+        # Hypothesis: if import/export were financially netted (unconfirmed -
+        # Luxembourg's autoconsommation scheme researched earlier suggests
+        # they're NOT), a phase-1 import is effectively "paid for" by
+        # simultaneous phase-2/3 export, same as if self-consumed. Then
+        # self-consumption is simply how much of total load production
+        # covered, capped at 100% since you can't self-consume more than
+        # you produced: min(consumption, production) / production.
+        self_consumed_w = consumption_w.clip(upper=production_w_fresh)
+        self_consumption_label = "Self-consumption % (assuming netting)"
+    else:
+        # Reality (per current research): export is paid at a separate, much
+        # lower feed-in/market rate - only energy that never touched the
+        # grid counts as self-consumed.
+        self_consumed_w = production_w_fresh - export_w
+        self_consumption_label = "Self-consumption %"
+    # Undefined (NaN -> gap in the fill) whenever there's no production, e.g. at night.
+    self_consumption_pct = (self_consumed_w / production_w_fresh * 100).where(production_w_fresh > 0)
+
+    totals = energy_totals(conn, totals_since, totals_until)
+
+    fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+    ax.set_axisbelow(True)
+    ax.grid(True, which="major", linewidth=0.5, alpha=0.5)
+
+    # Self-consumption % fill sits on its own 0-100 axis, underlaid behind
+    # the power lines (lower zorder + a transparent ax patch so it shows through).
+    ax2 = ax.twinx()
+    ax2.set_zorder(ax.get_zorder() - 1)
+    ax.patch.set_visible(False)
+    ax2.fill_between(grid, 0, self_consumption_pct, color="green", alpha=0.2, label=self_consumption_label)
+    ax2.set_ylim(0, 100)
+    ax2.set_ylabel("Self-consumption %", color="green")
+    ax2.tick_params(axis="y", labelcolor="green")
+
+    # Surplus: the gap between Production and Consumption whenever
+    # production is ahead - drawn behind the lines so they stay crisp on top.
+    ax.fill_between(
+        grid, consumption_w, production_w,
+        where=(production_w > consumption_w), color="blue", alpha=0.15, label="Surplus",
+    )
+
+    ax.plot(grid, import_w, label="Import", color="orange")
+    ax.plot(grid, export_w, label="Export", color="blue")
+    ax.plot(grid, production_w, label="Production", color="green")
+    ax.plot(grid, consumption_w, label="Consumption", color="red")
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("W")
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="upper right", fontsize="small")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LOCAL_TZ))
+    # Minor ticks every 10 minutes for finer-grained reading, unlabeled so
+    # they don't clutter a full-day window (only the major ticks get text).
+    ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=10))
+    ax.grid(True, which="minor", axis="x", linewidth=0.3, alpha=0.3)
+    # Fixed to the requested window, not the data's own range - a chart
+    # generated mid-day (or with gaps) must still show the whole window,
+    # not a stretched view of whatever data happens to exist so far.
+    ax.set_xlim(datetime.fromisoformat(since), datetime.fromisoformat(until))
+    fig.autofmt_xdate()
+
+    title_lines = [
+        f"Imported {_fmt_kwh(totals['imported_wh'])}  |  Exported {_fmt_kwh(totals['exported_wh'])}",
+        f"Net export {_fmt_kwh(totals['net_export_wh'])}  |  "
+        f"Net-exporting {_fmt_pct(totals['net_exporting_share'])} of samples",
+    ]
+    if totals["pv_production_wh"] is not None:
+        title_lines.append(
+            f"PV production {_fmt_kwh(totals['pv_production_wh'])}  |  "
+            f"Self-consumption {_fmt_pct(totals['self_consumption_ratio'])}"
+        )
+    ax.set_title("\n".join(title_lines), fontsize=8)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def render_phase_chart(
+    conn: sqlite3.Connection,
+    since: str,
+    until: str,
+    totals_since: str | None = None,
+    totals_until: str | None = None,
+    width_px: int = 1600,
+    height_px: int = 400,
+    dpi: int = 100,
+) -> bytes:
+    """Per-phase net grid power (produced - consumed for that phase alone).
+
+    Same-phase production and consumption cancel out silently before the
+    meter ever sees them, so this is the net residual per phase: positive
+    means that phase is exporting, negative means it's importing - useful
+    for spotting a phase imbalance (e.g. solar landing on phases 2/3 while
+    a load on phase 1 has to import regardless of overall surplus).
+
+    Plots [since, until), but the title's exporting-share always covers
+    [totals_since, totals_until) - see render_power_chart.
+    """
+    totals_since = totals_since or since
+    totals_until = totals_until or until
+
+    grid = _time_grid(since, until)
+
+    fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+    ax.set_axisbelow(True)
+    ax.grid(True, which="major", linewidth=0.5, alpha=0.5)
+
+    for p in PHASES:
+        consumed_w = _resample(conn, f"sensor-power_consumed_phase_{p}", since, until, grid)
+        produced_w = _resample(conn, f"sensor-power_produced_phase_{p}", since, until, grid)
+        net_w = produced_w - consumed_w
+        ax.plot(grid, net_w, label=f"Phase {p}", linestyle=PHASE_LINESTYLES[p])
+
+    exporting_shares = _phase_exporting_shares(conn, totals_since, totals_until)
+
+    ax.axhline(0, color="gray", linewidth=0.8)
+    ax.set_ylabel("W (+ exporting / - importing)")
+    ax.legend(loc="upper right", fontsize="small")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LOCAL_TZ))
+    # Minor ticks every 10 minutes for finer-grained reading, unlabeled so
+    # they don't clutter a full-day window (only the major ticks get text).
+    ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=10))
+    ax.grid(True, which="minor", axis="x", linewidth=0.3, alpha=0.3)
+    ax.set_xlim(datetime.fromisoformat(since), datetime.fromisoformat(until))
+    fig.autofmt_xdate()
+
+    ax.set_title(
+        "  |  ".join(
+            f"Phase {p} exporting {_fmt_pct(exporting_shares[p])} of samples" for p in PHASES
+        ),
+        fontsize=8,
+    )
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()

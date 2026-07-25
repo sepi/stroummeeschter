@@ -1,0 +1,14 @@
+[Unit]
+Description=stroummeeschter - SlimmeLezer to SQLite logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/stroummeeschter/.venv/bin/stroummeeschter-import-slimmelezer --url http://stroum --db /var/lib/stroummeeschter/stroum.db
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+StateDirectory=stroummeeschter
+
+[Install]
+WantedBy=multi-user.target

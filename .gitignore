@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+/test.sql
+/test.sql-wal
+/test.sql-shm
+envoy_token
+*.png
+
