@@ -1,12 +1,21 @@
 import math
 import sqlite3
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 from stroummeeschter import db
-from stroummeeschter.chart import _fetch_series, _resample, _time_grid, render_phase_chart, render_power_chart
+from stroummeeschter.chart import (
+    _fetch_series,
+    _resample,
+    _time_grid,
+    render_phase_chart,
+    render_power_chart,
+    render_trends_chart,
+)
+from stroummeeschter.trends import trend_buckets
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -258,3 +267,59 @@ def test_render_phase_chart_exporting_share_uses_totals_window_when_given(conn):
             totals_until="2026-07-26T00:00:00+00:00",
         )
         mocked.assert_called_once_with(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
+
+
+@pytest.fixture
+def trends_conn():
+    connection = sqlite3.connect(":memory:")
+    db.init_db(connection)
+    for eid in (
+        "sensor-energy_consumed_luxembourg",
+        "sensor-energy_produced_luxembourg",
+        "envoy-production_wh_lifetime",
+    ):
+        db.upsert_entity(connection, eid, "2026-07-20T00:00:00+00:00", unit="Wh", category=0)
+    # 3 days of cumulative counters, each day adding 1000 Wh consumed,
+    # 300 Wh exported, 1200 Wh produced (so each day: imported 1000,
+    # surplus = exported - imported = -700, consumed = 1200+1000-300=1900).
+    for day, base in enumerate([0, 1, 2]):
+        ts_start = f"2026-07-{22 + day}T04:00:00+00:00"
+        ts_end = f"2026-07-{23 + day}T03:59:59+00:00"
+        db.insert_reading(connection, "sensor-energy_consumed_luxembourg", base * 1000.0, ts_start)
+        db.insert_reading(connection, "sensor-energy_consumed_luxembourg", base * 1000.0 + 1000.0, ts_end)
+        db.insert_reading(connection, "sensor-energy_produced_luxembourg", base * 300.0, ts_start)
+        db.insert_reading(connection, "sensor-energy_produced_luxembourg", base * 300.0 + 300.0, ts_end)
+        db.insert_reading(connection, "envoy-production_wh_lifetime", base * 1200.0, ts_start)
+        db.insert_reading(connection, "envoy-production_wh_lifetime", base * 1200.0 + 1200.0, ts_end)
+    connection.commit()
+    yield connection
+    connection.close()
+
+
+def test_render_trends_chart_returns_valid_png(trends_conn):
+    buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    png = render_trends_chart(trends_conn, buckets)
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_render_trends_chart_signals_subset_returns_valid_png(trends_conn):
+    buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    png = render_trends_chart(trends_conn, buckets, signals={"imported", "surplus"})
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_render_trends_chart_handles_empty_buckets():
+    conn = sqlite3.connect(":memory:")
+    db.init_db(conn)
+    buckets = trend_buckets("week", 2, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    png = render_trends_chart(conn, buckets)
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_render_trends_chart_calls_energy_totals_once_per_bucket(trends_conn):
+    buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    with patch("stroummeeschter.chart.energy_totals", wraps=lambda *a: STUB_TOTALS) as mocked:
+        render_trends_chart(trends_conn, buckets)
+        assert mocked.call_count == len(buckets)
+        for (_, since, until), call in zip(buckets, mocked.call_args_list):
+            assert call.args == (trends_conn, since, until)

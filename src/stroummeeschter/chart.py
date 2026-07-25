@@ -34,6 +34,20 @@ POWER_SIGNALS = ("import", "export", "production", "consumption", "self_consumpt
 PHASE_SIGNALS = tuple(f"phase{p}_{direction}" for p in PHASES for direction in ("import", "export"))
 PHASE_COLORS = {"import": "orange", "export": "blue"}
 
+TREND_SIGNALS = ("imported", "exported", "produced", "consumed", "surplus")
+# Import/Export/Production keep their colors from the power chart for
+# consistency; Consumption switches from red-line to a distinct bar color
+# since red-as-line vs red-as-bar read very differently at a glance, and
+# Surplus gets its own color here since it's a full bar (can go negative),
+# not the transparent overlay fill it is on the power chart.
+TREND_COLORS = {
+    "imported": "orange",
+    "exported": "blue",
+    "produced": "green",
+    "consumed": "firebrick",
+    "surplus": "gray",
+}
+
 # All signals get resampled onto one regular grid at this resolution -
 # roughly the SlimmeLezer's own native cadence, so plotting doesn't invent
 # precision the data doesn't have. A shared regular index is also what
@@ -251,6 +265,79 @@ def render_power_chart(
     fig.savefig(buf, format="png")
     plt.close(fig)
     return buf.getvalue()
+
+
+def render_trends_chart(
+    conn: sqlite3.Connection,
+    buckets: list[tuple[str, str, str]],
+    signals: set[str] | None = None,
+    width_px: int = 1600,
+    height_px: int = 400,
+    dpi: int = 100,
+) -> bytes:
+    """Grouped bar chart of energy totals (kWh) per bucket - one bar group
+    per (label, since, until) in `buckets` (see trends.trend_buckets), oldest
+    first. Unlike the power/phase charts, buckets aren't points on a
+    continuous time axis (a "monthly" bucket isn't comparable in width to a
+    "yearly" one) so this uses categorical x-ticks, not a datetime axis.
+
+    `signals` (from TREND_SIGNALS) restricts which bars get drawn; None
+    (default) draws all five. Consumed is derived the same way as
+    stats.compute_stats: produced + imported - exported.
+    """
+    show = TREND_SIGNALS if signals is None else signals
+
+    labels = []
+    values = {name: [] for name in TREND_SIGNALS}
+    for label, since, until in buckets:
+        totals = energy_totals(conn, since, until)
+        imported_wh = totals["imported_wh"]
+        exported_wh = totals["exported_wh"]
+        produced_wh = totals["pv_production_wh"]
+        consumed_wh = (
+            produced_wh + imported_wh - exported_wh
+            if None not in (produced_wh, imported_wh, exported_wh)
+            else None
+        )
+        labels.append(label)
+        values["imported"].append(_kwh_or_nan(imported_wh))
+        values["exported"].append(_kwh_or_nan(exported_wh))
+        values["produced"].append(_kwh_or_nan(produced_wh))
+        values["consumed"].append(_kwh_or_nan(consumed_wh))
+        values["surplus"].append(_kwh_or_nan(totals["net_export_wh"]))
+
+    fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+    ax.set_axisbelow(True)
+    ax.grid(True, which="major", axis="y", linewidth=0.5, alpha=0.5)
+    ax.axhline(0, color="black", linewidth=0.8)
+
+    shown = [name for name in TREND_SIGNALS if name in show]
+    x = range(len(labels))
+    bar_width = 0.8 / max(len(shown), 1)
+    for i, name in enumerate(shown):
+        offsets = [xi + (i - (len(shown) - 1) / 2) * bar_width for xi in x]
+        ax.bar(offsets, values[name], width=bar_width, label=name.capitalize(), color=TREND_COLORS[name])
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("kWh")
+    ax.legend(loc="upper right", fontsize="small")
+
+    totals_line = "  |  ".join(
+        f"{name.capitalize()} {sum(v for v in values[name] if v == v):.1f} kWh"  # v == v filters NaN
+        for name in shown
+    )
+    ax.set_title(totals_line, fontsize=8)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _kwh_or_nan(wh: float | None) -> float:
+    return wh / 1000 if wh is not None else float("nan")
 
 
 def render_phase_chart(

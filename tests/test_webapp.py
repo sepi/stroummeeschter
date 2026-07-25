@@ -66,6 +66,27 @@ def test_chart_png_rejects_unknown_chart_type(server):
     assert resp.status_code == 400
 
 
+def test_chart_png_supports_trends_chart(server):
+    resp = requests.get(
+        server + "/chart.png",
+        params={"chart": "trends", "period": "week", "count": "4", "width": "300", "height": "200"},
+        timeout=5,
+    )
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_trends_defaults_count_from_period(server):
+    resp = requests.get(server + "/chart.png", params={"chart": "trends", "period": "month"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_rejects_unknown_period(server):
+    resp = requests.get(server + "/chart.png", params={"chart": "trends", "period": "fortnight"}, timeout=5)
+    assert resp.status_code == 400
+
+
 def test_chart_png_rejects_invalid_date(server):
     resp = requests.get(server + "/chart.png", params={"date": "not-a-date"}, timeout=5)
     assert resp.status_code == 400

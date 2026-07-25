@@ -88,3 +88,25 @@ def test_write_chart_supports_phases_selector(tmp_path):
 
     with open(out_path, "rb") as f:
         assert f.read(8) == PNG_MAGIC
+
+
+def test_write_chart_supports_trends_chart(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    out_path = str(tmp_path / "trends.png")
+    conn = db.connect(db_path)
+    db.init_db(conn)
+    for eid in (
+        "sensor-energy_consumed_luxembourg",
+        "sensor-energy_produced_luxembourg",
+        "envoy-production_wh_lifetime",
+    ):
+        db.upsert_entity(conn, eid, "2026-07-20T00:00:00+00:00", unit="Wh", category=0)
+        db.insert_reading(conn, eid, 0.0, "2026-07-24T04:00:00+00:00")
+        db.insert_reading(conn, eid, 1000.0, "2026-07-25T03:59:59+00:00")
+    conn.commit()
+    conn.close()
+
+    write_chart(db_path, out_path, width_px=300, height_px=200, chart="trends", period="week", count=2)
+
+    with open(out_path, "rb") as f:
+        assert f.read(8) == PNG_MAGIC

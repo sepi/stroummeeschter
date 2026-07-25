@@ -14,13 +14,25 @@ from datetime import date as date_cls
 from datetime import datetime, timedelta, timezone
 
 from stroummeeschter import db
-from stroummeeschter.chart import LOCAL_TZ, PHASE_SIGNALS, POWER_SIGNALS, render_phase_chart, render_power_chart
+from stroummeeschter.chart import (
+    LOCAL_TZ,
+    PHASE_SIGNALS,
+    POWER_SIGNALS,
+    TREND_SIGNALS,
+    render_phase_chart,
+    render_power_chart,
+    render_trends_chart,
+)
+from stroummeeschter.trends import DEFAULT_COUNT as TREND_DEFAULT_COUNT
+from stroummeeschter.trends import PERIODS as TREND_PERIODS
+from stroummeeschter.trends import trend_buckets
 
 logger = logging.getLogger(__name__)
 
 RENDERERS = {
     "power": render_power_chart,
     "phases": render_phase_chart,
+    "trends": render_trends_chart,
 }
 
 DEFAULT_DAY_START_HOUR = 6
@@ -53,6 +65,8 @@ def render_png(
     on_date: date_cls | None = None,
     assume_netting: bool = False,
     signals: str | None = None,
+    period: str = "day",
+    count: int | None = None,
 ) -> bytes:
     """Resolve the time window and render one chart to PNG bytes. Shared by
     the file-writing CLI below and webapp.py's on-demand HTTP endpoint, so
@@ -60,9 +74,25 @@ def render_png(
 
     `signals` is a comma-separated string (e.g. "import,export") rather
     than a set, since both call sites (CLI args, URL query strings) hand
-    this through as plain text."""
-    render = RENDERERS[chart]
+    this through as plain text.
+
+    `period`/`count` only apply to --chart trends: buckets aren't points on
+    a since/until timeline like power/phases are, so that chart bypasses
+    the day-window resolution below entirely."""
     signal_set = {s.strip() for s in signals.split(",") if s.strip()} if signals else None
+
+    if chart == "trends":
+        buckets = trend_buckets(period, count or TREND_DEFAULT_COUNT[period], day_start_hour=day_start_hour)
+        conn = db.connect(db_path)
+        db.init_db(conn)
+        try:
+            return render_trends_chart(
+                conn, buckets, signals=signal_set, width_px=width_px, height_px=height_px
+            )
+        finally:
+            conn.close()
+
+    render = RENDERERS[chart]
 
     # Totals always cover the full calendar day, regardless of --hours - a
     # "3 hour total" isn't a useful stat; "today's total" is what matters,
@@ -114,6 +144,8 @@ def write_chart(
     on_date: date_cls | None = None,
     assume_netting: bool = False,
     signals: str | None = None,
+    period: str = "day",
+    count: int | None = None,
 ) -> None:
     png = render_png(
         db_path,
@@ -125,6 +157,8 @@ def write_chart(
         on_date=on_date,
         assume_netting=assume_netting,
         signals=signals,
+        period=period,
+        count=count,
     )
 
     # Write via a temp file + atomic rename so a concurrent reader (a static
@@ -185,7 +219,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--signals",
         default=None,
         help="Comma-separated list of signals to draw (default: all). "
-        f"Power chart: {','.join(POWER_SIGNALS)}. Phase chart: {','.join(PHASE_SIGNALS)}.",
+        f"Power chart: {','.join(POWER_SIGNALS)}. Phase chart: {','.join(PHASE_SIGNALS)}. "
+        f"Trends chart: {','.join(TREND_SIGNALS)}.",
+    )
+    parser.add_argument(
+        "--period",
+        choices=TREND_PERIODS,
+        default="day",
+        help="Bucket size for --chart trends (default: %(default)s). Ignored otherwise.",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=None,
+        help="Number of buckets for --chart trends (default depends on --period: "
+        f"{TREND_DEFAULT_COUNT}). Ignored otherwise.",
     )
     parser.add_argument("--width", type=int, default=1600, help="Image width in pixels (default: %(default)s)")
     parser.add_argument("--height", type=int, default=400, help="Image height in pixels (default: %(default)s)")
@@ -217,6 +265,8 @@ def main(argv: list[str] | None = None) -> None:
         chart=args.chart,
         assume_netting=args.assume_netting,
         signals=args.signals,
+        period=args.period,
+        count=args.count,
     )
 
     if args.interval is None:

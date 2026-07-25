@@ -21,9 +21,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from stroummeeschter import db
-from stroummeeschter.chart import PHASE_SIGNALS, POWER_SIGNALS
+from stroummeeschter.chart import PHASE_SIGNALS, POWER_SIGNALS, TREND_SIGNALS
 from stroummeeschter.chart_cli import DEFAULT_DAY_START_HOUR, RENDERERS, render_png
 from stroummeeschter.stats import compute_stats
+from stroummeeschter.trends import DEFAULT_COUNT as TREND_DEFAULT_COUNT
+from stroummeeschter.trends import PERIODS as TREND_PERIODS
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,15 @@ _INDEX_HTML = f"""<!doctype html>
     <select id="chart-type">
       <option value="power">Power</option>
       <option value="phases">Phases</option>
+      <option value="trends">Trends</option>
+    </select>
+  </label>
+  <label id="period-label" style="display:none">Period:
+    <select id="period">
+      <option value="day">Daily</option>
+      <option value="week">Weekly</option>
+      <option value="month">Monthly</option>
+      <option value="year">Yearly</option>
     </select>
   </label>
   <div id="power-signals" class="signal-grid">
@@ -79,8 +90,11 @@ _INDEX_HTML = f"""<!doctype html>
   <div id="phase-signals" class="signal-grid" style="display:none">
   {_signal_checkboxes(PHASE_SIGNALS)}
   </div>
+  <div id="trend-signals" class="signal-grid" style="display:none">
+  {_signal_checkboxes(TREND_SIGNALS)}
+  </div>
   <label id="netting-label"><input type="checkbox" id="assume-netting"> Assume netting</label>
-  <label>Hours: <input type="number" id="hours" placeholder="full day" style="width:5em"></label>
+  <label id="hours-label">Hours: <input type="number" id="hours" placeholder="full day" style="width:5em"></label>
   <label><input type="checkbox" id="show-stats"> Stats</label>
 </div>
 <div id="chart-wrap"><img id="chart-img"></div>
@@ -91,9 +105,13 @@ _INDEX_HTML = f"""<!doctype html>
   var chartType = document.getElementById('chart-type');
   var powerSignals = document.getElementById('power-signals');
   var phaseSignals = document.getElementById('phase-signals');
+  var trendSignals = document.getElementById('trend-signals');
   var nettingLabel = document.getElementById('netting-label');
   var assumeNetting = document.getElementById('assume-netting');
+  var hoursLabel = document.getElementById('hours-label');
   var hoursInput = document.getElementById('hours');
+  var periodLabel = document.getElementById('period-label');
+  var period = document.getElementById('period');
   var showStats = document.getElementById('show-stats');
   var statsPanel = document.getElementById('stats-panel');
 
@@ -104,18 +122,27 @@ _INDEX_HTML = f"""<!doctype html>
 
   function updateSrc() {{
     var isPhases = chartType.value === 'phases';
-    powerSignals.style.display = isPhases ? 'none' : '';
+    var isTrends = chartType.value === 'trends';
+    powerSignals.style.display = (isPhases || isTrends) ? 'none' : '';
     phaseSignals.style.display = isPhases ? '' : 'none';
-    nettingLabel.style.display = isPhases ? 'none' : '';
+    trendSignals.style.display = isTrends ? '' : 'none';
+    nettingLabel.style.display = (isPhases || isTrends) ? 'none' : '';
+    hoursLabel.style.display = isTrends ? 'none' : '';
+    periodLabel.style.display = isTrends ? '' : 'none';
 
-    var signals = checkedSignals(isPhases ? phaseSignals : powerSignals);
+    var signalContainer = isTrends ? trendSignals : (isPhases ? phaseSignals : powerSignals);
+    var signals = checkedSignals(signalContainer);
     var params = new URLSearchParams();
     params.set('chart', chartType.value);
     params.set('width', Math.round(window.innerWidth));
     params.set('height', Math.round(window.innerHeight - 42));
     params.set('signals', signals.join(','));
-    if (!isPhases && assumeNetting.checked) params.set('assume_netting', '1');
-    if (hoursInput.value) params.set('hours', hoursInput.value);
+    if (isTrends) {{
+      params.set('period', period.value);
+    }} else {{
+      if (!isPhases && assumeNetting.checked) params.set('assume_netting', '1');
+      if (hoursInput.value) params.set('hours', hoursInput.value);
+    }}
     params.set('t', Date.now());  // cache-bust: always refetch, never a stale cached image
     img.src = '/chart.png?' + params.toString();
   }}
@@ -170,6 +197,7 @@ _INDEX_HTML = f"""<!doctype html>
   chartType.addEventListener('change', updateSrc);
   assumeNetting.addEventListener('change', updateSrc);
   hoursInput.addEventListener('change', updateSrc);
+  period.addEventListener('change', updateSrc);
   Array.prototype.forEach.call(document.querySelectorAll('input[data-signal]'), function (el) {{
     el.addEventListener('change', updateSrc);
   }});
@@ -278,6 +306,12 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
 
             signals = (query.get("signals") or [None])[0]
 
+            period = (query.get("period") or ["day"])[0]
+            if period not in TREND_PERIODS:
+                self.send_error(400, f"unknown period '{period}', expected one of {TREND_PERIODS}")
+                return
+            count = _query_int(query, "count", TREND_DEFAULT_COUNT[period], 1, 366)
+
             png = render_png(
                 db_path,
                 width,
@@ -288,6 +322,8 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 on_date=on_date,
                 assume_netting=_query_bool(query, "assume_netting"),
                 signals=signals,
+                period=period,
+                count=count,
             )
 
             self.send_response(200)
@@ -310,8 +346,8 @@ def build_server(db_path: str, host: str, port: int) -> ThreadingHTTPServer:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stroummeeschter-web",
-        description="Serve charts on demand over HTTP (GET /chart.png?chart=power|phases&hours=&date=&"
-        "day_start_hour=&width=&height=&assume_netting=).",
+        description="Serve charts on demand over HTTP (GET /chart.png?chart=power|phases|trends&hours=&date=&"
+        "day_start_hour=&width=&height=&assume_netting=&period=&count=).",
     )
     parser.add_argument(
         "--db",
