@@ -1,0 +1,131 @@
+import threading
+from datetime import datetime, timedelta, timezone
+from http.server import ThreadingHTTPServer
+
+import pytest
+import requests
+
+from stroummeeschter import db
+from stroummeeschter.webapp import build_server, make_handler
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.fixture
+def server(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    conn = db.connect(db_path)
+    db.init_db(conn)
+    for eid in ("sensor-power_consumed", "sensor-power_produced"):
+        db.upsert_entity(conn, eid, "2026-07-25T00:00:00+00:00", unit="W", category=0)
+    db.insert_reading(conn, "sensor-power_consumed", 500.0, "2026-07-25T08:00:00+00:00")
+    db.insert_reading(conn, "sensor-power_produced", 900.0, "2026-07-25T08:00:00+00:00")
+    conn.commit()
+    conn.close()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db_path))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{httpd.server_port}"
+    httpd.shutdown()
+    thread.join()
+
+
+def test_index_serves_html(server):
+    resp = requests.get(server + "/", timeout=5)
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["Content-Type"]
+    assert b"/chart.png" in resp.content
+
+
+def test_chart_png_default_params(server):
+    resp = requests.get(server + "/chart.png", timeout=5)
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "image/png"
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_accepts_all_documented_params(server):
+    resp = requests.get(
+        server + "/chart.png",
+        params={"chart": "phases", "hours": "3", "width": "300", "height": "200", "assume_netting": "true"},
+        timeout=5,
+    )
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_with_explicit_date(server):
+    resp = requests.get(server + "/chart.png", params={"date": "2026-07-25"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_rejects_unknown_chart_type(server):
+    resp = requests.get(server + "/chart.png", params={"chart": "nonsense"}, timeout=5)
+    assert resp.status_code == 400
+
+
+def test_chart_png_rejects_invalid_date(server):
+    resp = requests.get(server + "/chart.png", params={"date": "not-a-date"}, timeout=5)
+    assert resp.status_code == 400
+
+
+def test_chart_png_clamps_out_of_range_dimensions(server):
+    # Absurd values must not crash the server - just get clamped.
+    resp = requests.get(server + "/chart.png", params={"width": "999999999", "height": "-5"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_stats_json(tmp_path):
+    # /stats.json uses real "now" internally, so (unlike the chart tests)
+    # this needs data timestamped relative to actual current time, not the
+    # `server` fixture's fixed 2026 dates.
+    db_path = str(tmp_path / "stats.db")
+    conn = db.connect(db_path)
+    db.init_db(conn)
+    db.upsert_entity(conn, "sensor-power_consumed", "2026-07-25T00:00:00+00:00", unit="W", category=0)
+    # A few seconds in the past, not "now" exactly - the horizon query's
+    # upper bound is exclusive, and by the time the HTTP request actually
+    # reaches the server, real "now" has moved past whatever we compute here.
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(timespec="seconds")
+    db.insert_reading(conn, "sensor-power_consumed", 500.0, recent)
+    conn.commit()
+    conn.close()
+
+    httpd = build_server(db_path, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp = requests.get(f"http://127.0.0.1:{httpd.server_port}/stats.json", timeout=5)
+        assert resp.status_code == 200
+        assert resp.headers["Content-Type"] == "application/json"
+        data = resp.json()
+        assert "generated_at" in data
+        assert set(data["horizons"]) == {"last_hour", "last_day", "last_week", "last_month", "total"}
+        assert data["horizons"]["last_hour"]["import_w"]["max_w"] == 500.0
+    finally:
+        httpd.shutdown()
+        thread.join()
+
+
+def test_unknown_path_is_404(server):
+    resp = requests.get(server + "/nope", timeout=5)
+    assert resp.status_code == 404
+
+
+def test_build_server_initializes_a_fresh_unmigrated_db(tmp_path):
+    # render_png() calls db.init_db() on every request, so even a brand new
+    # db path (never touched by the logger) must work immediately.
+    db_path = str(tmp_path / "fresh.db")
+    httpd = build_server(db_path, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp = requests.get(f"http://127.0.0.1:{httpd.server_port}/chart.png", timeout=5)
+        assert resp.status_code == 200
+        assert resp.content.startswith(PNG_MAGIC)
+    finally:
+        httpd.shutdown()
+        thread.join()

@@ -19,6 +19,7 @@ dependencies = [
 stroummeeschter-import-slimmelezer = "stroummeeschter.cli:main"
 stroummeeschter-import-envoy = "stroummeeschter.envoy_cli:main"
 stroummeeschter-chart = "stroummeeschter.chart_cli:main"
+stroummeeschter-web = "stroummeeschter.webapp:main"
 
 [tool.setuptools]
 script-files = [

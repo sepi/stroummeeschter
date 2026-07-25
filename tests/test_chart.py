@@ -26,6 +26,37 @@ def conn():
     connection.close()
 
 
+def test_fetch_series_dedupes_same_second_readings():
+    # Regression: two genuine readings for the same entity landing in the
+    # same second (recorded_at only has second precision - e.g. an SSE
+    # reconnect's full-snapshot replay overlapping a real delta) used to
+    # crash every downstream _resample() with "cannot reindex on an axis
+    # with duplicate labels". The later reading should win.
+    conn = sqlite3.connect(":memory:")
+    db.init_db(conn)
+    db.upsert_entity(conn, "sensor-power_consumed_phase_1", "2026-07-25T00:00:00+00:00", unit="W", category=0)
+    db.insert_reading(conn, "sensor-power_consumed_phase_1", 100.0, "2026-07-25T08:00:00+00:00")
+    db.insert_reading(conn, "sensor-power_consumed_phase_1", 200.0, "2026-07-25T08:00:00+00:00")
+    conn.commit()
+
+    series = _fetch_series(conn, "sensor-power_consumed_phase_1", "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
+    assert len(series) == 1
+    assert series.iloc[0] == 200.0
+
+
+def test_render_phase_chart_survives_same_second_duplicate_readings():
+    conn = sqlite3.connect(":memory:")
+    db.init_db(conn)
+    for eid in ("sensor-power_consumed_phase_1", "sensor-power_produced_phase_2", "sensor-power_produced_phase_3"):
+        db.upsert_entity(conn, eid, "2026-07-25T00:00:00+00:00", unit="W", category=0)
+        db.insert_reading(conn, eid, 500.0, "2026-07-25T08:00:00+00:00")
+        db.insert_reading(conn, eid, 510.0, "2026-07-25T08:00:00+00:00")  # duplicate second
+    conn.commit()
+
+    png = render_phase_chart(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
+    assert png.startswith(PNG_MAGIC)
+
+
 def test_render_power_chart_returns_valid_png(conn):
     png = render_power_chart(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
     assert png.startswith(PNG_MAGIC)

@@ -14,7 +14,7 @@ from datetime import date as date_cls
 from datetime import datetime, timedelta, timezone
 
 from stroummeeschter import db
-from stroummeeschter.chart import LOCAL_TZ, render_phase_chart, render_power_chart
+from stroummeeschter.chart import LOCAL_TZ, PHASE_SIGNALS, POWER_SIGNALS, render_phase_chart, render_power_chart
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,8 @@ def day_window(day_start_hour: int = DEFAULT_DAY_START_HOUR, on_date: date_cls |
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
-def write_chart(
+def render_png(
     db_path: str,
-    out_path: str,
     width_px: int,
     height_px: int,
     chart: str = "power",
@@ -53,8 +52,17 @@ def write_chart(
     day_start_hour: int = DEFAULT_DAY_START_HOUR,
     on_date: date_cls | None = None,
     assume_netting: bool = False,
-) -> None:
+    signals: str | None = None,
+) -> bytes:
+    """Resolve the time window and render one chart to PNG bytes. Shared by
+    the file-writing CLI below and webapp.py's on-demand HTTP endpoint, so
+    the window-resolution rules only live in one place.
+
+    `signals` is a comma-separated string (e.g. "import,export") rather
+    than a set, since both call sites (CLI args, URL query strings) hand
+    this through as plain text."""
     render = RENDERERS[chart]
+    signal_set = {s.strip() for s in signals.split(",") if s.strip()} if signals else None
 
     # Totals always cover the full calendar day, regardless of --hours - a
     # "3 hour total" isn't a useful stat; "today's total" is what matters,
@@ -80,18 +88,44 @@ def write_chart(
     conn = db.connect(db_path)
     db.init_db(conn)
     try:
-        png = render(
+        return render(
             conn,
             since.isoformat(timespec="seconds"),
             until.isoformat(timespec="seconds"),
             totals_since=totals_since.isoformat(timespec="seconds"),
             totals_until=totals_until.isoformat(timespec="seconds"),
+            signals=signal_set,
             width_px=width_px,
             height_px=height_px,
             **extra_kwargs,
         )
     finally:
         conn.close()
+
+
+def write_chart(
+    db_path: str,
+    out_path: str,
+    width_px: int,
+    height_px: int,
+    chart: str = "power",
+    hours: float | None = None,
+    day_start_hour: int = DEFAULT_DAY_START_HOUR,
+    on_date: date_cls | None = None,
+    assume_netting: bool = False,
+    signals: str | None = None,
+) -> None:
+    png = render_png(
+        db_path,
+        width_px,
+        height_px,
+        chart=chart,
+        hours=hours,
+        day_start_hour=day_start_hour,
+        on_date=on_date,
+        assume_netting=assume_netting,
+        signals=signals,
+    )
 
     # Write via a temp file + atomic rename so a concurrent reader (a static
     # web server, the thermal printer fetch) never sees a half-written PNG.
@@ -147,6 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
         "export)/production. Unconfirmed hypothesis, not known billing reality - see chart.py. "
         "Only affects --chart power.",
     )
+    parser.add_argument(
+        "--signals",
+        default=None,
+        help="Comma-separated list of signals to draw (default: all). "
+        f"Power chart: {','.join(POWER_SIGNALS)}. Phase chart: {','.join(PHASE_SIGNALS)}.",
+    )
     parser.add_argument("--width", type=int, default=1600, help="Image width in pixels (default: %(default)s)")
     parser.add_argument("--height", type=int, default=400, help="Image height in pixels (default: %(default)s)")
     parser.add_argument(
@@ -176,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
         on_date=args.date,
         chart=args.chart,
         assume_netting=args.assume_netting,
+        signals=args.signals,
     )
 
     if args.interval is None:

@@ -30,6 +30,10 @@ LOCAL_TZ = ZoneInfo("Europe/Luxembourg")
 PHASES = (1, 2, 3)
 PHASE_LINESTYLES = {1: "-", 2: "--", 3: "-."}
 
+POWER_SIGNALS = ("import", "export", "production", "consumption", "self_consumption", "surplus")
+PHASE_SIGNALS = tuple(f"phase{p}_{direction}" for p in PHASES for direction in ("import", "export"))
+PHASE_COLORS = {"import": "orange", "export": "blue"}
+
 # All signals get resampled onto one regular grid at this resolution -
 # roughly the SlimmeLezer's own native cadence, so plotting doesn't invent
 # precision the data doesn't have. A shared regular index is also what
@@ -88,7 +92,12 @@ def _fetch_series(conn: sqlite3.Connection, entity_id: str, since: str, until: s
     if not rows:
         return pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
     index = pd.to_datetime([r[0] for r in rows], utc=True)
-    return pd.Series([r[1] for r in rows], index=index)
+    series = pd.Series([r[1] for r in rows], index=index)
+    # recorded_at only has second-level precision - two genuinely distinct
+    # readings can land in the same second (e.g. an SSE reconnect's full
+    # snapshot replay overlapping a real delta update). reindex() requires
+    # a unique index, so keep the later of any tie - the more recent value.
+    return series[~series.index.duplicated(keep="last")]
 
 
 def _resample(
@@ -124,6 +133,7 @@ def render_power_chart(
     totals_since: str | None = None,
     totals_until: str | None = None,
     assume_netting: bool = False,
+    signals: set[str] | None = None,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
@@ -132,9 +142,15 @@ def render_power_chart(
     [totals_since, totals_until) - which defaults to [since, until) but is
     meant to be passed the current calendar day regardless of what's being
     plotted, so "today's totals" stays meaningful even when zoomed into a
-    shorter window (see chart_cli.write_chart)."""
+    shorter window (see chart_cli.write_chart).
+
+    `signals` (from POWER_SIGNALS) restricts which lines/fills get drawn;
+    None (default) draws all of them. Everything is still computed
+    regardless - the title's aggregates never depend on what's toggled on
+    for display."""
     totals_since = totals_since or since
     totals_until = totals_until or until
+    show = POWER_SIGNALS if signals is None else signals
 
     grid = _time_grid(since, until)
     import_w = _resample(conn, ENTITY_IMPORT_W, since, until, grid)
@@ -180,22 +196,28 @@ def render_power_chart(
     ax2 = ax.twinx()
     ax2.set_zorder(ax.get_zorder() - 1)
     ax.patch.set_visible(False)
-    ax2.fill_between(grid, 0, self_consumption_pct, color="green", alpha=0.2, label=self_consumption_label)
+    if "self_consumption" in show:
+        ax2.fill_between(grid, 0, self_consumption_pct, color="green", alpha=0.2, label=self_consumption_label)
     ax2.set_ylim(0, 100)
     ax2.set_ylabel("Self-consumption %", color="green")
     ax2.tick_params(axis="y", labelcolor="green")
 
     # Surplus: the gap between Production and Consumption whenever
     # production is ahead - drawn behind the lines so they stay crisp on top.
-    ax.fill_between(
-        grid, consumption_w, production_w,
-        where=(production_w > consumption_w), color="blue", alpha=0.15, label="Surplus",
-    )
+    if "surplus" in show:
+        ax.fill_between(
+            grid, consumption_w, production_w,
+            where=(production_w > consumption_w), color="blue", alpha=0.15, label="Surplus",
+        )
 
-    ax.plot(grid, import_w, label="Import", color="orange")
-    ax.plot(grid, export_w, label="Export", color="blue")
-    ax.plot(grid, production_w, label="Production", color="green")
-    ax.plot(grid, consumption_w, label="Consumption", color="red")
+    if "import" in show:
+        ax.plot(grid, import_w, label="Import", color="orange")
+    if "export" in show:
+        ax.plot(grid, export_w, label="Export", color="blue")
+    if "production" in show:
+        ax.plot(grid, production_w, label="Production", color="green")
+    if "consumption" in show:
+        ax.plot(grid, consumption_w, label="Consumption", color="red")
     ax.set_ylim(bottom=0)
     ax.set_ylabel("W")
     lines, labels = ax.get_legend_handles_labels()
@@ -237,23 +259,28 @@ def render_phase_chart(
     until: str,
     totals_since: str | None = None,
     totals_until: str | None = None,
+    signals: set[str] | None = None,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
 ) -> bytes:
-    """Per-phase net grid power (produced - consumed for that phase alone).
+    """Per-phase import and export power - raw signals, not pre-netted.
 
     Same-phase production and consumption cancel out silently before the
-    meter ever sees them, so this is the net residual per phase: positive
-    means that phase is exporting, negative means it's importing - useful
-    for spotting a phase imbalance (e.g. solar landing on phases 2/3 while
-    a load on phase 1 has to import regardless of overall surplus).
+    meter ever sees them, so a phase's import/export lines already reflect
+    that netting - this is useful for spotting a phase imbalance (e.g.
+    solar landing on phases 2/3 while a load on phase 1 has to import
+    regardless of overall surplus).
 
     Plots [since, until), but the title's exporting-share always covers
-    [totals_since, totals_until) - see render_power_chart.
+    [totals_since, totals_until) - see render_power_chart. `signals` (from
+    PHASE_SIGNALS, e.g. "phase1_import") restricts which lines get drawn;
+    None draws all six. Color follows direction (orange=import, blue=export,
+    matching render_power_chart); linestyle follows phase.
     """
     totals_since = totals_since or since
     totals_until = totals_until or until
+    show = PHASE_SIGNALS if signals is None else signals
 
     grid = _time_grid(since, until)
 
@@ -264,13 +291,15 @@ def render_phase_chart(
     for p in PHASES:
         consumed_w = _resample(conn, f"sensor-power_consumed_phase_{p}", since, until, grid)
         produced_w = _resample(conn, f"sensor-power_produced_phase_{p}", since, until, grid)
-        net_w = produced_w - consumed_w
-        ax.plot(grid, net_w, label=f"Phase {p}", linestyle=PHASE_LINESTYLES[p])
+        if f"phase{p}_import" in show:
+            ax.plot(grid, consumed_w, label=f"Phase {p} Import", linestyle=PHASE_LINESTYLES[p], color=PHASE_COLORS["import"])
+        if f"phase{p}_export" in show:
+            ax.plot(grid, produced_w, label=f"Phase {p} Export", linestyle=PHASE_LINESTYLES[p], color=PHASE_COLORS["export"])
 
     exporting_shares = _phase_exporting_shares(conn, totals_since, totals_until)
 
-    ax.axhline(0, color="gray", linewidth=0.8)
-    ax.set_ylabel("W (+ exporting / - importing)")
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("W")
     ax.legend(loc="upper right", fontsize="small")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LOCAL_TZ))
     # Minor ticks every 10 minutes for finer-grained reading, unlabeled so

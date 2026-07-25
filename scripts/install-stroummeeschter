@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$BASE_DIR/venv"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
-UNITS="stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-chart"
+UNITS="stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-web"
 
 # ---------------------------------------------------------------------------
 # 1. Create venv and install pip-tools

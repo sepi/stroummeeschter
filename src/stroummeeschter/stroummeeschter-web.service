@@ -1,0 +1,13 @@
+[Unit]
+Description=stroummeeschter - on-demand chart web server
+After=stroummeeschter-import-slimmelezer.service
+
+[Service]
+WorkingDirectory=/home/pi/stroummeeschter
+ExecStart=/home/pi/stroummeeschter/venv/bin/stroummeeschter-web --db /home/pi/stroummeeschter/stroum.db --port 8080
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

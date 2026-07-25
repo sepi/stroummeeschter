@@ -1,2 +1,2 @@
 #!/bin/sh
-systemctl --user restart stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-chart
+systemctl --user restart stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-web
