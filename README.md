@@ -262,10 +262,16 @@ bash scripts/install-stroummeeschter
 
 The script will:
 1. Create a Python virtual environment in the project directory (`venv/`)
-2. Sync dependencies via `pip-sync`, then install this package itself
-   (`pip-sync` only handles third-party deps; without a separate install
-   step the `stroummeeschter-import-slimmelezer` etc. console scripts
-   wouldn't exist)
+2. Install dependencies from `requirements.in` (loose version bounds) -
+   deliberately **not** the pinned `requirements.txt`, since that lock file
+   was resolved by `pip-compile` on whatever machine last regenerated it (a
+   modern x86_64 dev box), and its exact matplotlib/pandas/numpy pins may
+   not exist as prebuilt wheels for an older Pi/Debian/Python combination.
+   Letting pip resolve freely is what "no separate build machine" actually
+   requires; `requirements.txt` remains what CI/dev installs use, on a
+   machine those pins are known to match. Then installs this package
+   itself (without a separate step the `stroummeeschter-import-slimmelezer`
+   etc. console scripts wouldn't exist)
 3. Install and start all three systemd **user** services (below)
 
 Before `stroummeeschter-import-envoy` is useful, put your Envoy access

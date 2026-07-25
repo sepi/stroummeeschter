@@ -8,23 +8,30 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 UNITS="stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-web"
 
 # ---------------------------------------------------------------------------
-# 1. Create venv and install pip-tools
+# 1. Create venv
 # ---------------------------------------------------------------------------
 if [ ! -d "$VENV" ]; then
     python3 -m venv "$VENV"
 fi
 
 "$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet pip-tools
 
 # ---------------------------------------------------------------------------
-# 2. Sync dependencies via pip-sync, then install this package itself -
-#    pip-sync only syncs requirements.txt (third-party deps); it doesn't
-#    install stroummeeschter, so the console-script entry points
-#    (stroummeeschter-import-slimmelezer etc.) wouldn't exist without this.
-#    --no-deps so it can't override the versions pip-sync just pinned.
+# 2. Install dependencies from requirements.in (loose version bounds), not
+#    the pinned requirements.txt - that lock file was resolved by pip-compile
+#    on whatever machine last regenerated it (a modern x86_64 dev box), and
+#    its exact pins for matplotlib/pandas/numpy may simply not exist as
+#    prebuilt wheels for an older Pi/Debian/Python combination. Letting pip
+#    resolve freely here is what "no separate build machine" (see README)
+#    actually requires - requirements.txt is still what CI/dev installs use,
+#    on a machine those pins are known to match.
+#
+#    Then install this package itself (--no-deps, so it can't drag in
+#    different dependency versions than were just installed above) -
+#    without this the console-script entry points
+#    (stroummeeschter-import-slimmelezer etc.) wouldn't exist at all.
 # ---------------------------------------------------------------------------
-"$VENV/bin/pip-sync" "$BASE_DIR/requirements.txt"
+"$VENV/bin/pip" install --quiet -r "$BASE_DIR/requirements.in"
 "$VENV/bin/pip" install --quiet --no-deps "$BASE_DIR"
 
 # ---------------------------------------------------------------------------
