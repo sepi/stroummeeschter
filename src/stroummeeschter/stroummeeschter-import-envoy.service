@@ -1,0 +1,14 @@
+[Unit]
+Description=stroummeeschter - Envoy production poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/pi/stroummeeschter
+ExecStart=/home/pi/stroummeeschter/venv/bin/stroummeeschter-import-envoy --url https://envoy --token-file /home/pi/stroummeeschter/envoy_token --db /home/pi/stroummeeschter/stroum.db --interval 60
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

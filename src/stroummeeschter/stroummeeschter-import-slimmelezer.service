@@ -1,0 +1,14 @@
+[Unit]
+Description=stroummeeschter - SlimmeLezer to SQLite logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/pi/stroummeeschter
+ExecStart=/home/pi/stroummeeschter/venv/bin/stroummeeschter-import-slimmelezer --url http://stroum --db /home/pi/stroummeeschter/stroum.db
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

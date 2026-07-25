@@ -1,0 +1,58 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+VENV="$BASE_DIR/venv"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+UNITS="stroummeeschter-import-slimmelezer stroummeeschter-import-envoy stroummeeschter-chart"
+
+# ---------------------------------------------------------------------------
+# 1. Create venv and install pip-tools
+# ---------------------------------------------------------------------------
+if [ ! -d "$VENV" ]; then
+    python3 -m venv "$VENV"
+fi
+
+"$VENV/bin/pip" install --quiet --upgrade pip
+"$VENV/bin/pip" install --quiet pip-tools
+
+# ---------------------------------------------------------------------------
+# 2. Sync dependencies via pip-sync, then install this package itself -
+#    pip-sync only syncs requirements.txt (third-party deps); it doesn't
+#    install stroummeeschter, so the console-script entry points
+#    (stroummeeschter-import-slimmelezer etc.) wouldn't exist without this.
+#    --no-deps so it can't override the versions pip-sync just pinned.
+# ---------------------------------------------------------------------------
+"$VENV/bin/pip-sync" "$BASE_DIR/requirements.txt"
+"$VENV/bin/pip" install --quiet --no-deps "$BASE_DIR"
+
+# ---------------------------------------------------------------------------
+# 3. Install systemd user units
+# ---------------------------------------------------------------------------
+mkdir -p "$SYSTEMD_DIR"
+
+for unit in $UNITS; do
+    sed "s|/home/pi/stroummeeschter|$BASE_DIR|g" \
+        "$BASE_DIR/src/stroummeeschter/$unit.service" \
+        > "$SYSTEMD_DIR/$unit.service"
+done
+
+systemctl --user daemon-reload
+
+# ---------------------------------------------------------------------------
+# 4. Enable and start all units
+# ---------------------------------------------------------------------------
+for unit in $UNITS; do
+    systemctl --user enable --now "$unit.service"
+done
+
+echo ""
+echo "Done."
+for unit in $UNITS; do
+    echo "  $unit: $(systemctl --user is-active "$unit.service")"
+done
+echo ""
+echo "Before stroummeeschter-import-envoy is useful, put your Envoy access"
+echo "token in $BASE_DIR/envoy_token (chmod 600), then:"
+echo "  systemctl --user restart stroummeeschter-import-envoy"

@@ -20,6 +20,13 @@ stroummeeschter-import-slimmelezer = "stroummeeschter.cli:main"
 stroummeeschter-import-envoy = "stroummeeschter.envoy_cli:main"
 stroummeeschter-chart = "stroummeeschter.chart_cli:main"
 
+[tool.setuptools]
+script-files = [
+    "scripts/install-stroummeeschter",
+    "scripts/update-stroummeeschter",
+    "scripts/restart-stroummeeschter",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

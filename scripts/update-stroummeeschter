@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+REF="${1:-main}"
+
+cd "$BASE_DIR"
+git fetch origin
+git checkout "$REF"
+git merge --ff-only "origin/$REF" 2>/dev/null || true
+
+# Re-syncs deps and reinstalls the package (enables+starts units if this is
+# somehow the first run, otherwise leaves already-running units alone).
+"$SCRIPT_DIR/install-stroummeeschter"
+
+# install-stroummeeschter doesn't restart units that were already running,
+# so force it here - otherwise the old code just keeps running.
+"$SCRIPT_DIR/restart-stroummeeschter"

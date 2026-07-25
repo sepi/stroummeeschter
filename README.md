@@ -247,75 +247,59 @@ pip-compile --strip-extras --output-file=requirements.txt requirements.in
 pip-compile --strip-extras --output-file=requirements-dev.txt requirements-dev.in
 ```
 
-## Building and installing the wheel on the server
+## Installing on the Pi (or any target machine)
+
+No separate build machine needed - dependencies (matplotlib, pandas) get
+resolved for whatever architecture/Python you're installing on, which
+matters on a Pi since those aren't pure-Python. Just `git` and `python3`
+on the target:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install build
-python -m build --wheel
-# copy dist/stroummeeschter-*.whl to the server, then there:
-pip install stroummeeschter-*.whl
+git clone git@github-sepi:sepi/stroummeeschter.git
+cd stroummeeschter
+bash scripts/install-stroummeeschter
 ```
 
-### Running as systemd services
+The script will:
+1. Create a Python virtual environment in the project directory (`venv/`)
+2. Sync dependencies via `pip-sync`, then install this package itself
+   (`pip-sync` only handles third-party deps; without a separate install
+   step the `stroummeeschter-import-slimmelezer` etc. console scripts
+   wouldn't exist)
+3. Install and start all three systemd **user** services (below)
+
+Before `stroummeeschter-import-envoy` is useful, put your Envoy access
+token in `envoy_token` (in the project directory) and `chmod 600` it,
+then `systemctl --user restart stroummeeschter-import-envoy`.
+
+## Updating
+
+```bash
+scripts/update-stroummeeschter          # updates to latest main
+scripts/update-stroummeeschter v0.2.0   # or a specific branch/tag/commit
+```
+
+Pulls the given ref, re-syncs dependencies, reinstalls the package, and
+restarts all three services.
+
+## Running as systemd services
 
 The logger, the Envoy poller, and the chart writer are independent
-processes - run whichever combination you need.
+processes, installed as **user** (not system) services by
+`scripts/install-stroummeeschter` - the unit templates live in
+`src/stroummeeschter/*.service` and get their placeholder path
+(`/home/pi/stroummeeschter`) swapped for the actual checkout location at
+install time. Manage them directly with:
 
-```ini
-# /etc/systemd/system/stroummeeschter-import-slimmelezer.service
-[Unit]
-Description=stroummeeschter - SlimmeLezer to SQLite logger
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/opt/stroummeeschter/.venv/bin/stroummeeschter-import-slimmelezer --url http://stroum --db /var/lib/stroummeeschter/stroum.db
-Restart=on-failure
-RestartSec=5
-DynamicUser=yes
-StateDirectory=stroummeeschter
-
-[Install]
-WantedBy=multi-user.target
+```bash
+systemctl --user status|restart stroummeeschter-import-slimmelezer
+systemctl --user status|restart stroummeeschter-import-envoy
+systemctl --user status|restart stroummeeschter-chart
+journalctl --user -u stroummeeschter-import-slimmelezer -f
 ```
 
-```ini
-# /etc/systemd/system/stroummeeschter-import-envoy.service
-[Unit]
-Description=stroummeeschter - Envoy production poller
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/opt/stroummeeschter/.venv/bin/stroummeeschter-import-envoy --url https://envoy \
-  --token-file /etc/stroummeeschter/envoy_token \
-  --db /var/lib/stroummeeschter/stroum.db --interval 60
-Restart=on-failure
-RestartSec=5
-DynamicUser=yes
-StateDirectory=stroummeeschter
-ConfigurationDirectory=stroummeeschter
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/stroummeeschter-chart.service
-[Unit]
-Description=stroummeeschter - power chart writer
-After=stroummeeschter-import-slimmelezer.service
-
-[Service]
-ExecStart=/opt/stroummeeschter/.venv/bin/stroummeeschter-chart \
-  --db /var/lib/stroummeeschter/stroum.db \
-  --out /var/www/html/power.png --interval 60
-Restart=on-failure
-RestartSec=5
-DynamicUser=yes
-StateDirectory=stroummeeschter
-
-[Install]
-WantedBy=multi-user.target
-```
+`stroummeeschter-chart`'s `--out` writes `power.png` into the project
+directory - point whatever fetches it (e.g. rafthercal's `ImagePlugin`,
+which fetches `IMAGE_URL` over HTTP) at a URL that resolves to that file.
+That needs something serving it - **not yet wired up**, since it depends on
+what's already running on the target Pi.

@@ -1,0 +1,13 @@
+[Unit]
+Description=stroummeeschter - power chart writer
+After=stroummeeschter-import-slimmelezer.service
+
+[Service]
+WorkingDirectory=/home/pi/stroummeeschter
+ExecStart=/home/pi/stroummeeschter/venv/bin/stroummeeschter-chart --db /home/pi/stroummeeschter/stroum.db --out /home/pi/stroummeeschter/power.png --interval 60
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
