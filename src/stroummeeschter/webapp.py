@@ -123,7 +123,7 @@ _INDEX_HTML = f"""<!doctype html>
   var HORIZON_LABELS = {{last_hour: 'Last hour', last_day: 'Last day', last_week: 'Last week',
                          last_month: 'Last month', total: 'Total'}};
 
-  function fmtW(v) {{ return v === null || v === undefined ? '-' : Math.round(v) + ' W'; }}
+  function fmtW(v) {{ return v === null || v === undefined ? '-' : (v / 1000).toFixed(2) + ' kW'; }}
   function fmtMinAvgMax(stat) {{
     if (!stat) return '-';
     return fmtW(stat.min_w) + ' / ' + fmtW(stat.avg_w) + ' / ' + fmtW(stat.max_w);
