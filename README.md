@@ -18,9 +18,10 @@ SQLite database:
 | `stroummeeschter-web` | Serves charts and stats on demand over HTTP, plus an interactive browser page |
 
 Only `stroummeeschter-import-slimmelezer` is required to get anything
-useful; the Envoy poller adds true solar production (and with it, a real
-self-consumption ratio); the chart/web tools are just views over
-whatever's in the database.
+useful; the Envoy poller adds true solar production (Net import,
+Production, and PV production totals otherwise have nothing to combine
+with); the chart/web tools are just views over whatever's in the
+database.
 
 ## Quick start (installing on a Raspberry Pi or similar)
 
@@ -168,8 +169,9 @@ not real data. `_pick_production_entry` in `envoy_cli.py` only trusts an
 microinverter-summed `inverters` entry, which is always live. Confirmed
 against a real install exactly matching this case.
 
-Combined with the grid meter's export total, this gives a real
-self-consumption ratio - see [Viewing charts](#viewing-charts).
+Combined with the grid meter's Net import, this gives PV production
+totals and the Production/Consumption lines - see
+[Viewing charts](#viewing-charts).
 
 ## Database
 
@@ -216,17 +218,18 @@ Two ways to get a chart, sharing all their rendering logic
 stroummeeschter-web --db stroummeeschter.db --port 8080
 ```
 
-- `GET /chart.png?chart=power|phases&hours=&date=&day_start_hour=&width=&height=&signals=&assume_netting=` -
+- `GET /chart.png?chart=power|phases|trends&hours=&date=&day_start_hour=&width=&height=&signals=&period=&count=` -
   the chart itself, generated fresh on every request (always current,
   every CLI option below available as a query param). Point rafthercal's
   `ImagePlugin` (`IMAGE_URL` config) at this for printing, or fetch it
   from a browser/AJAX call.
 - `GET /stats.json` - see [Stats](#stats) below.
 - `GET /` - an interactive page: chart-type selector, per-signal
-  checkboxes (2x3 grid, swaps between power/phase signals), an "assume
-  netting" toggle, an hours override, a live stats table (toggleable, at
-  the bottom), auto-resizes to the browser window, and refreshes every
-  30s (and on resize/control change).
+  checkboxes (2x3 grid, swaps between power/phase/trend signals - gross
+  import/export start unchecked, matching the CLI default), an hours
+  override, a period selector (for `trends`), a live stats table
+  (toggleable, at the bottom), auto-resizes to the browser window, and
+  refreshes every 30s (and on resize/control change).
 
 `--host` defaults to `0.0.0.0` (LAN-reachable, no auth) and `--port`
 defaults to `8080` (env `STROUMMEESCHTER_WEB_HOST` / `_WEB_PORT`) - this
@@ -244,12 +247,14 @@ stroummeeschter-chart --db stroummeeschter.db --out power.png --interval 60
 Writes atomically (temp file + rename) so a concurrent reader never sees
 a half-written PNG. Same options as the query params above, as CLI flags
 (`--chart`, `--hours`, `--day-start-hour`, `--date`, `--width`, `--height`,
-`--signals`, `--assume-netting`), plus `--interval` (omit to render once
+`--signals`, `--period`, `--count`), plus `--interval` (omit to render once
 and exit).
 
 ### Time window
 
-By default, both charts cover the current *local* calendar day, from
+This section covers `power`/`phases`; `trends` uses `--period`/`--count`
+instead (see below) - by default, both cover the current *local* calendar
+day, from
 `--day-start-hour`/`day_start_hour` (default `6`, i.e. 6am, timezone
 `Europe/Luxembourg`) to the same hour the next day - so "today's chart"
 means the same thing regardless of when you generate it, and a live chart
@@ -261,45 +266,79 @@ a quick "last 3 hours" check) - the title/stats aggregates still always
 cover the full calendar day even then, since "today's total" matters
 regardless of how far you've zoomed in.
 
+### Symbols
+
+Confirmed directly with the utility - billing is **net-metered**, not
+gross-metered:
+
+- **Ig / Eg** - gross import / export power (or energy) at the connection
+  point, read directly from the SlimmeLezer.
+- **In = Ig - Eg** - net import: the quantity actually billed. **En = -In**
+  - net export.
+- **P** - PV production, from Envoy.
+- **C = In + P** - consumption (energy balance identity - holds regardless
+  of billing).
+- **S = max(0, En)** - surplus: how much production exceeded consumption.
+
+Since gross Import/Export aren't what's billed and aren't very
+interesting to look at day to day, every chart type hides them by default
+(`DEFAULT_POWER_SIGNALS`/`DEFAULT_TREND_SIGNALS` in `chart.py`) - pass
+them explicitly via `--signals`/`signals=` to see them.
+
 ### Chart types and signals
 
-**`power`** (default): six possible signals, each independently toggleable
-via `--signals`/`signals=` (comma-separated; omit for all):
+**`power`** (default): six possible signals, each independently
+toggleable via `--signals`/`signals=` (comma-separated; omit for the
+default subset below):
 
-- **Import** (orange), **Export** (blue), **Production** (green) - read
-  directly from a sensor.
-- **Consumption** (solid red) - derived: `production + import - export`
-  (the instantaneous energy balance), plotted *positive* alongside
+- **Import** (orange), **Export** (blue) - Ig/Eg, hidden by default.
+- **Net import** (purple, shown by default) - In. Can go negative (net
+  exporting), so unlike the all-non-negative signals below, the y-axis
+  isn't floored at 0 - a black zero line marks the boundary instead.
+- **Production** (green) - P, read directly from Envoy.
+- **Consumption** (solid red) - C = In + P, plotted *positive* alongside
   Production so a surplus/deficit shows up directly as which line is on
   top, rather than needing to read a sign.
 - **Surplus** - a transparent blue fill between Consumption and
-  Production wherever production is ahead.
-- **Self-consumption %** - a green fill on a secondary 0-100% axis.
-  Default formula `(production - export) / production` (only energy that
-  never touched the grid counts as self-consumed - matches Luxembourg's
-  autoconsommation billing, where export is paid at a separate, lower
-  market rate, not netted against import). `--assume-netting` switches to
-  `min(consumption, production) / production` instead - an **unconfirmed
-  hypothesis** that import and export are financially netted, which the
-  autoconsommation research above suggests is *not* how it actually works;
-  the flag exists to visualize "what if" for comparison, not as a claim
-  about real billing.
+  Production wherever production is ahead (S = max(0, En) = P - C).
+
+There's deliberately no self-consumption ratio: under confirmed net
+metering every Wh of production reduces In 1:1 whether it was used
+on-site in the same instant or briefly exported and re-imported
+elsewhere, so a "fraction self-consumed" number doesn't correspond to
+anything actually billed - see `aggregates.py`.
 
 **`phases`**: **Phase {1,2,3} Import/Export** (color = direction, orange/
 blue, matching the power chart; linestyle = phase) - raw per-phase grid
-power, not pre-netted. Same-phase production and consumption already
+power, not pre-netted (billing nets across all phases combined, so
+per-phase gross flows are still the interesting signal here, unlike the
+combined power chart). Same-phase production and consumption already
 cancel out silently before the meter ever measures them, so these lines
 are the net residual per phase - useful for spotting a phase imbalance
 (e.g. solar landing on phases 2/3 while a load on phase 1 has to import
 regardless of overall surplus).
 
-Both charts show gridlines (major + 10-minute minor ticks) and bake the
-period's aggregates into the title: Imported/Exported/Net export (kWh)
-and the share of samples net-exporting for `power` (from the meter's own
-cumulative energy counters, not integrated from noisier power samples -
-see `aggregates.py`); PV production and self-consumption % additionally,
-only when Envoy data is present in the window; per-phase exporting share
-for `phases`.
+**`trends`**: a grouped bar chart of energy totals (kWh) per bucket -
+`--period {day,week,month,year}` (default `day`) sets the bucket size,
+`--count` how many buckets (defaults: 30 days, 12 weeks, 12 months, 5
+years). Buckets are calendar-aware (a "monthly" bucket spans that actual
+month, not a fixed 30 days) and end with whichever bucket "now" currently
+falls in - the same day-start-hour convention as `power`/`phases`,
+generalized to week/month/year. Six signals, same default-hidden-gross
+rule as `power`: **Imported/Exported** (hidden by default), **Net
+import** (purple), **Produced** (green), **Consumed** (firebrick),
+**Surplus** (gray) - all read straight from `aggregates.energy_totals()`
+per bucket. Unlike `power`/`phases`, the x-axis is categorical (bucket
+labels), not a datetime axis - buckets of different periods aren't
+comparable in width.
+
+`power`/`phases` show gridlines (major + 10-minute minor ticks) and bake
+the period's aggregates into the title: Imported/Exported/Net export
+(kWh) and the share of samples net-exporting for `power` (from the
+meter's own cumulative energy counters, not integrated from noisier power
+samples - see `aggregates.py`); PV production additionally, only when
+Envoy data is present in the window; per-phase exporting share for
+`phases`. `trends` sums the shown signals' totals into its title instead.
 
 ### How signals get aligned
 
@@ -322,8 +361,8 @@ Two different forward-fill tolerances are used, deliberately:
   "current" value, which made a *derived* signal (Consumption) look like
   it was tracking a real trend it wasn't.
 - **`DERIVED_MAX_GAP` (60 seconds)** specifically when Production feeds
-  into Consumption or Self-consumption %. Envoy updates far less often
-  than the SlimmeLezer, so holding its value for the full 5 minutes just
+  into Consumption. Envoy updates far less often than the SlimmeLezer, so
+  holding its value for the full 5 minutes just
   to keep a *derived* line "continuous" would quietly stretch one real
   Envoy reading across many grid points that don't actually have fresh
   data - a milder, everyday version of the same problem. Tuned from real
@@ -355,10 +394,13 @@ Consumption (`stats.py`):
   over months of history. The average is cheap and exact: avg power =
   energy / time, using the same energy-balance identity as the chart's
   Consumption line, just as a plain total rather than a resampled series.
-- **Imported/Exported/Produced/Consumed/Net export (kWh)** for every
-  horizon - reusing `aggregates.energy_totals()` (cheap for any window).
-- **Self-consumption ratio, net-exporting share** - also from
-  `energy_totals()`.
+- **Imported/Exported/Produced/Consumed/Net import/Net export (kWh)** for
+  every horizon - reusing `aggregates.energy_totals()` (cheap for any
+  window), which derives Consumed from the confirmed net-metering
+  identity (`consumed = net_import + produced`) rather than duplicating
+  that math per call site.
+- **Net-exporting share** - also from `energy_totals()`. No
+  self-consumption ratio - see [Chart types and signals](#chart-types-and-signals).
 
 Shown in `stroummeeschter-web`'s browser page as a toggleable table at
 the bottom.

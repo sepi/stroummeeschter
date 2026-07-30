@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from stroummeeschter import db
-from stroummeeschter.chart import PHASE_SIGNALS, POWER_SIGNALS, TREND_SIGNALS
+from stroummeeschter.chart import DEFAULT_POWER_SIGNALS, DEFAULT_TREND_SIGNALS, PHASE_SIGNALS, POWER_SIGNALS, TREND_SIGNALS
 from stroummeeschter.chart_cli import DEFAULT_DAY_START_HOUR, RENDERERS, render_png
 from stroummeeschter.stats import compute_stats
 from stroummeeschter.trends import DEFAULT_COUNT as TREND_DEFAULT_COUNT
@@ -36,9 +36,14 @@ MAX_HOURS = 24 * 30
 REFRESH_MS = 30_000
 
 
-def _signal_checkboxes(signals: tuple[str, ...]) -> str:
+def _signal_checkboxes(signals: tuple[str, ...], checked: tuple[str, ...] | None = None) -> str:
+    """`checked` (default: all of `signals`) controls which boxes start
+    ticked - mirrors the backend's own signals=None default, so the page's
+    initial view matches what a bare CLI/URL render would produce."""
+    checked_set = signals if checked is None else checked
     return "\n".join(
-        f'<label><input type="checkbox" data-signal="{s}" checked> {s.replace("_", " ")}</label>'
+        f'<label><input type="checkbox" data-signal="{s}"{" checked" if s in checked_set else ""}> '
+        f'{s.replace("_", " ")}</label>'
         for s in signals
     )
 
@@ -85,15 +90,14 @@ _INDEX_HTML = f"""<!doctype html>
     </select>
   </label>
   <div id="power-signals" class="signal-grid">
-  {_signal_checkboxes(POWER_SIGNALS)}
+  {_signal_checkboxes(POWER_SIGNALS, checked=DEFAULT_POWER_SIGNALS)}
   </div>
   <div id="phase-signals" class="signal-grid" style="display:none">
   {_signal_checkboxes(PHASE_SIGNALS)}
   </div>
   <div id="trend-signals" class="signal-grid" style="display:none">
-  {_signal_checkboxes(TREND_SIGNALS)}
+  {_signal_checkboxes(TREND_SIGNALS, checked=DEFAULT_TREND_SIGNALS)}
   </div>
-  <label id="netting-label"><input type="checkbox" id="assume-netting"> Assume netting</label>
   <label id="hours-label">Hours: <input type="number" id="hours" placeholder="full day" style="width:5em"></label>
   <label><input type="checkbox" id="show-stats"> Stats</label>
 </div>
@@ -106,8 +110,6 @@ _INDEX_HTML = f"""<!doctype html>
   var powerSignals = document.getElementById('power-signals');
   var phaseSignals = document.getElementById('phase-signals');
   var trendSignals = document.getElementById('trend-signals');
-  var nettingLabel = document.getElementById('netting-label');
-  var assumeNetting = document.getElementById('assume-netting');
   var hoursLabel = document.getElementById('hours-label');
   var hoursInput = document.getElementById('hours');
   var periodLabel = document.getElementById('period-label');
@@ -126,7 +128,6 @@ _INDEX_HTML = f"""<!doctype html>
     powerSignals.style.display = (isPhases || isTrends) ? 'none' : '';
     phaseSignals.style.display = isPhases ? '' : 'none';
     trendSignals.style.display = isTrends ? '' : 'none';
-    nettingLabel.style.display = (isPhases || isTrends) ? 'none' : '';
     hoursLabel.style.display = isTrends ? 'none' : '';
     periodLabel.style.display = isTrends ? '' : 'none';
 
@@ -139,9 +140,8 @@ _INDEX_HTML = f"""<!doctype html>
     params.set('signals', signals.join(','));
     if (isTrends) {{
       params.set('period', period.value);
-    }} else {{
-      if (!isPhases && assumeNetting.checked) params.set('assume_netting', '1');
-      if (hoursInput.value) params.set('hours', hoursInput.value);
+    }} else if (hoursInput.value) {{
+      params.set('hours', hoursInput.value);
     }}
     params.set('t', Date.now());  // cache-bust: always refetch, never a stale cached image
     img.src = '/chart.png?' + params.toString();
@@ -165,19 +165,20 @@ _INDEX_HTML = f"""<!doctype html>
     var rows = ['<tr><th>Horizon</th>' +
                 '<th>Import (min/avg/max)</th><th>Imported</th>' +
                 '<th>Export (min/avg/max)</th><th>Exported</th>' +
+                '<th>Net import</th>' +
                 '<th>Production (min/avg/max)</th><th>Produced</th>' +
                 '<th>Consumption (avg)</th><th>Consumed</th>' +
-                '<th>Net export</th><th>Self-consumption</th><th>Net-exporting</th></tr>'];
+                '<th>Net export</th><th>Net-exporting</th></tr>'];
     Object.keys(HORIZON_LABELS).forEach(function (key) {{
       var h = data.horizons[key];
       if (!h) return;
       rows.push('<tr><td>' + HORIZON_LABELS[key] + '</td><td>' +
         fmtMinAvgMax(h.import_w) + '</td><td>' + fmtKwh(h.imported_wh) + '</td><td>' +
         fmtMinAvgMax(h.export_w) + '</td><td>' + fmtKwh(h.exported_wh) + '</td><td>' +
+        fmtKwh(h.net_import_wh) + '</td><td>' +
         fmtMinAvgMax(h.production_w) + '</td><td>' + fmtKwh(h.produced_wh) + '</td><td>' +
         fmtW(h.avg_consumption_w) + '</td><td>' + fmtKwh(h.consumed_wh) + '</td><td>' +
         fmtKwh(h.net_export_wh) + '</td><td>' +
-        fmtPct(h.self_consumption_ratio) + '</td><td>' +
         fmtPct(h.net_exporting_share) + '</td></tr>');
     }});
     statsPanel.innerHTML = '<table>' + rows.join('') + '</table>';
@@ -195,7 +196,6 @@ _INDEX_HTML = f"""<!doctype html>
   }});
 
   chartType.addEventListener('change', updateSrc);
-  assumeNetting.addEventListener('change', updateSrc);
   hoursInput.addEventListener('change', updateSrc);
   period.addEventListener('change', updateSrc);
   Array.prototype.forEach.call(document.querySelectorAll('input[data-signal]'), function (el) {{
@@ -236,13 +236,6 @@ def _query_int(query: dict, key: str, default: int, lo: int, hi: int) -> int:
     except (KeyError, IndexError, ValueError):
         return default
     return int(_clamp(value, lo, hi))
-
-
-def _query_bool(query: dict, key: str) -> bool:
-    values = query.get(key)
-    if not values:
-        return False
-    return values[0].strip().lower() in ("1", "true", "yes", "on")
 
 
 def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
@@ -320,7 +313,6 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 hours=_query_hours(query),
                 day_start_hour=day_start_hour,
                 on_date=on_date,
-                assume_netting=_query_bool(query, "assume_netting"),
                 signals=signals,
                 period=period,
                 count=count,
@@ -347,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stroummeeschter-web",
         description="Serve charts on demand over HTTP (GET /chart.png?chart=power|phases|trends&hours=&date=&"
-        "day_start_hour=&width=&height=&assume_netting=&period=&count=).",
+        "day_start_hour=&width=&height=&signals=&period=&count=).",
     )
     parser.add_argument(
         "--db",

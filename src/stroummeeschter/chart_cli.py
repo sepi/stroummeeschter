@@ -63,7 +63,6 @@ def render_png(
     hours: float | None = None,
     day_start_hour: int = DEFAULT_DAY_START_HOUR,
     on_date: date_cls | None = None,
-    assume_netting: bool = False,
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
@@ -113,8 +112,6 @@ def render_png(
     else:
         since, until = totals_since, totals_until
 
-    extra_kwargs = {"assume_netting": assume_netting} if chart == "power" else {}
-
     conn = db.connect(db_path)
     db.init_db(conn)
     try:
@@ -127,7 +124,6 @@ def render_png(
             signals=signal_set,
             width_px=width_px,
             height_px=height_px,
-            **extra_kwargs,
         )
     finally:
         conn.close()
@@ -142,7 +138,6 @@ def write_chart(
     hours: float | None = None,
     day_start_hour: int = DEFAULT_DAY_START_HOUR,
     on_date: date_cls | None = None,
-    assume_netting: bool = False,
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
@@ -155,7 +150,6 @@ def write_chart(
         hours=hours,
         day_start_hour=day_start_hour,
         on_date=on_date,
-        assume_netting=assume_netting,
         signals=signals,
         period=period,
         count=count,
@@ -208,17 +202,10 @@ def build_parser() -> argparse.ArgumentParser:
         "one. Ignored if --hours is given.",
     )
     parser.add_argument(
-        "--assume-netting",
-        action="store_true",
-        help="Compute self-consumption %% as if import/export were financially netted "
-        "(min(consumption, production)/production) instead of the default (production - "
-        "export)/production. Unconfirmed hypothesis, not known billing reality - see chart.py. "
-        "Only affects --chart power.",
-    )
-    parser.add_argument(
         "--signals",
         default=None,
-        help="Comma-separated list of signals to draw (default: all). "
+        help="Comma-separated list of signals to draw (default: gross import/export hidden, "
+        "everything else shown - see chart.py DEFAULT_POWER_SIGNALS/DEFAULT_TREND_SIGNALS). "
         f"Power chart: {','.join(POWER_SIGNALS)}. Phase chart: {','.join(PHASE_SIGNALS)}. "
         f"Trends chart: {','.join(TREND_SIGNALS)}.",
     )
@@ -263,7 +250,6 @@ def main(argv: list[str] | None = None) -> None:
         day_start_hour=args.day_start_hour,
         on_date=args.date,
         chart=args.chart,
-        assume_netting=args.assume_netting,
         signals=args.signals,
         period=args.period,
         count=args.count,

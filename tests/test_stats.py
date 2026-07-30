@@ -88,6 +88,7 @@ def test_avg_consumption_derived_from_energy_balance(conn):
     assert last_hour["imported_wh"] == pytest.approx(200.0)
     assert last_hour["exported_wh"] == pytest.approx(300.0)
     assert last_hour["consumed_wh"] == pytest.approx(900.0)
+    assert last_hour["net_import_wh"] == pytest.approx(-100.0)  # imported 200 - exported 300
 
 
 def test_total_horizon_uses_actual_earliest_reading_not_epoch(conn):

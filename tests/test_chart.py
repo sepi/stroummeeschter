@@ -8,6 +8,8 @@ import pytest
 
 from stroummeeschter import db
 from stroummeeschter.chart import (
+    DEFAULT_POWER_SIGNALS,
+    DEFAULT_TREND_SIGNALS,
     _fetch_series,
     _resample,
     _time_grid,
@@ -85,12 +87,18 @@ def test_render_power_chart_with_production_data(conn):
     assert png.startswith(PNG_MAGIC)
 
 
-def test_render_power_chart_with_assume_netting(conn):
-    db.upsert_entity(conn, "envoy-production_w", "2026-07-25T00:00:00+00:00", unit="W", category=0)
-    db.insert_reading(conn, "envoy-production_w", 3000.0, "2026-07-25T08:00:02+00:00")
-    conn.commit()
+def test_default_power_signals_hide_gross_import_export():
+    # Confirmed net-metered billing: gross import/export aren't interesting
+    # day to day - the default view shows net_import instead.
+    assert "import" not in DEFAULT_POWER_SIGNALS
+    assert "export" not in DEFAULT_POWER_SIGNALS
+    assert "net_import" in DEFAULT_POWER_SIGNALS
 
-    png = render_power_chart(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", assume_netting=True)
+
+def test_render_power_chart_with_gross_signals_explicitly_requested(conn):
+    png = render_power_chart(
+        conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", signals={"import", "export"}
+    )
     assert png.startswith(PNG_MAGIC)
 
 
@@ -232,10 +240,11 @@ def test_render_phase_chart_handles_empty_window():
 STUB_TOTALS = {
     "imported_wh": None,
     "exported_wh": None,
+    "net_import_wh": None,
     "net_export_wh": None,
     "net_exporting_share": None,
     "pv_production_wh": None,
-    "self_consumption_ratio": None,
+    "consumed_wh": None,
 }
 
 
@@ -294,6 +303,12 @@ def trends_conn():
     connection.commit()
     yield connection
     connection.close()
+
+
+def test_default_trend_signals_hide_gross_imported_exported():
+    assert "imported" not in DEFAULT_TREND_SIGNALS
+    assert "exported" not in DEFAULT_TREND_SIGNALS
+    assert "net_import" in DEFAULT_TREND_SIGNALS
 
 
 def test_render_trends_chart_returns_valid_png(trends_conn):

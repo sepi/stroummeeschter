@@ -48,7 +48,7 @@ def test_chart_png_default_params(server):
 def test_chart_png_accepts_all_documented_params(server):
     resp = requests.get(
         server + "/chart.png",
-        params={"chart": "phases", "hours": "3", "width": "300", "height": "200", "assume_netting": "true"},
+        params={"chart": "phases", "hours": "3", "width": "300", "height": "200", "signals": "phase1_import"},
         timeout=5,
     )
     assert resp.status_code == 200

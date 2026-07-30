@@ -30,19 +30,26 @@ LOCAL_TZ = ZoneInfo("Europe/Luxembourg")
 PHASES = (1, 2, 3)
 PHASE_LINESTYLES = {1: "-", 2: "--", 3: "-."}
 
-POWER_SIGNALS = ("import", "export", "production", "consumption", "self_consumption", "surplus")
+POWER_SIGNALS = ("import", "export", "net_import", "production", "consumption", "surplus")
+# Billing is confirmed net-metered (net_import = import - export is what's
+# actually billed) - the gross Import/Export lines aren't very interesting
+# to look at day to day, so they're hidden unless explicitly requested via
+# --signals; net_import is shown instead.
+DEFAULT_POWER_SIGNALS = tuple(s for s in POWER_SIGNALS if s not in ("import", "export"))
 PHASE_SIGNALS = tuple(f"phase{p}_{direction}" for p in PHASES for direction in ("import", "export"))
 PHASE_COLORS = {"import": "orange", "export": "blue"}
 
-TREND_SIGNALS = ("imported", "exported", "produced", "consumed", "surplus")
-# Import/Export/Production keep their colors from the power chart for
-# consistency; Consumption switches from red-line to a distinct bar color
-# since red-as-line vs red-as-bar read very differently at a glance, and
-# Surplus gets its own color here since it's a full bar (can go negative),
-# not the transparent overlay fill it is on the power chart.
+TREND_SIGNALS = ("imported", "exported", "net_import", "produced", "consumed", "surplus")
+DEFAULT_TREND_SIGNALS = tuple(s for s in TREND_SIGNALS if s not in ("imported", "exported"))
+# Import/Export/Production/net_import keep their colors from the power
+# chart for consistency; Consumption switches from red-line to a distinct
+# bar color since red-as-line vs red-as-bar read very differently at a
+# glance, and Surplus gets its own color here since it's a full bar (can go
+# negative), not the transparent overlay fill it is on the power chart.
 TREND_COLORS = {
     "imported": "orange",
     "exported": "blue",
+    "net_import": "purple",
     "produced": "green",
     "consumed": "firebrick",
     "surplus": "gray",
@@ -64,8 +71,8 @@ RESAMPLE_FREQ = "10s"
 # real trend it wasn't. Past this gap, show a break (NaN) instead.
 MAX_GAP = pd.Timedelta(minutes=5)
 
-# A signal combining multiple sources (Consumption, self-consumption %) is
-# only as fresh as its slowest input. Envoy updates far less often than the
+# A signal combining multiple sources (Consumption) is only as fresh as its
+# slowest input. Envoy updates far less often than the
 # SlimmeLezer, so holding its value for the full MAX_GAP just to keep a
 # derived line "continuous" quietly stretches one real reading across many
 # grid points that don't actually have fresh data - a milder, everyday
@@ -146,7 +153,6 @@ def render_power_chart(
     until: str,
     totals_since: str | None = None,
     totals_until: str | None = None,
-    assume_netting: bool = False,
     signals: set[str] | None = None,
     width_px: int = 1600,
     height_px: int = 400,
@@ -159,45 +165,30 @@ def render_power_chart(
     shorter window (see chart_cli.write_chart).
 
     `signals` (from POWER_SIGNALS) restricts which lines/fills get drawn;
-    None (default) draws all of them. Everything is still computed
-    regardless - the title's aggregates never depend on what's toggled on
-    for display."""
+    None (default) draws DEFAULT_POWER_SIGNALS (gross import/export hidden -
+    pass them explicitly via --signals to see them). Everything is still
+    computed regardless - the title's aggregates never depend on what's
+    toggled on for display."""
     totals_since = totals_since or since
     totals_until = totals_until or until
-    show = POWER_SIGNALS if signals is None else signals
+    show = DEFAULT_POWER_SIGNALS if signals is None else signals
 
     grid = _time_grid(since, until)
-    import_w = _resample(conn, ENTITY_IMPORT_W, since, until, grid)
-    export_w = _resample(conn, ENTITY_EXPORT_W, since, until, grid)
+    import_w = _resample(conn, ENTITY_IMPORT_W, since, until, grid)  # Ig
+    export_w = _resample(conn, ENTITY_EXPORT_W, since, until, grid)  # Eg
+    # In = Ig - Eg: the net-metered quantity actually billed (confirmed with
+    # the utility) - the headline signal, unlike either gross line alone.
+    net_import_w = import_w - export_w
     production_w = _resample(conn, ENTITY_PRODUCTION_W, since, until, grid)
     # Tighter tolerance specifically for combining into derived signals below
     # - see DERIVED_MAX_GAP. production_w (the loose version) is still what
     # gets displayed as the raw Production line.
     production_w_fresh = _resample(conn, ENTITY_PRODUCTION_W, since, until, grid, max_gap=DERIVED_MAX_GAP)
 
-    # consumption = production + import - export (energy balance at any instant);
-    # plotted positive, alongside Production, so a surplus/deficit shows up
-    # directly as which line is on top - no sign-reading required.
-    consumption_w = production_w_fresh + import_w - export_w
-
-    if assume_netting:
-        # Hypothesis: if import/export were financially netted (unconfirmed -
-        # Luxembourg's autoconsommation scheme researched earlier suggests
-        # they're NOT), a phase-1 import is effectively "paid for" by
-        # simultaneous phase-2/3 export, same as if self-consumed. Then
-        # self-consumption is simply how much of total load production
-        # covered, capped at 100% since you can't self-consume more than
-        # you produced: min(consumption, production) / production.
-        self_consumed_w = consumption_w.clip(upper=production_w_fresh)
-        self_consumption_label = "Self-consumption % (assuming netting)"
-    else:
-        # Reality (per current research): export is paid at a separate, much
-        # lower feed-in/market rate - only energy that never touched the
-        # grid counts as self-consumed.
-        self_consumed_w = production_w_fresh - export_w
-        self_consumption_label = "Self-consumption %"
-    # Undefined (NaN -> gap in the fill) whenever there's no production, e.g. at night.
-    self_consumption_pct = (self_consumed_w / production_w_fresh * 100).where(production_w_fresh > 0)
+    # C = In + P (energy balance at any instant); plotted positive, alongside
+    # Production, so a surplus/deficit shows up directly as which line is on
+    # top - no sign-reading required.
+    consumption_w = production_w_fresh + net_import_w
 
     totals = energy_totals(conn, totals_since, totals_until)
 
@@ -205,19 +196,11 @@ def render_power_chart(
     ax.set_axisbelow(True)
     ax.grid(True, which="major", linewidth=0.5, alpha=0.5)
 
-    # Self-consumption % fill sits on its own 0-100 axis, underlaid behind
-    # the power lines (lower zorder + a transparent ax patch so it shows through).
-    ax2 = ax.twinx()
-    ax2.set_zorder(ax.get_zorder() - 1)
-    ax.patch.set_visible(False)
-    if "self_consumption" in show:
-        ax2.fill_between(grid, 0, self_consumption_pct, color="green", alpha=0.2, label=self_consumption_label)
-    ax2.set_ylim(0, 100)
-    ax2.set_ylabel("Self-consumption %", color="green")
-    ax2.tick_params(axis="y", labelcolor="green")
-
-    # Surplus: the gap between Production and Consumption whenever
-    # production is ahead - drawn behind the lines so they stay crisp on top.
+    # Surplus: S = max(0, En) = max(0, -In) = P - C whenever production is
+    # ahead - drawn as the gap between the Production/Consumption lines
+    # (rather than a flat 0-baseline fill) so it's visually anchored at the
+    # height those lines are actually at; behind the lines so they stay
+    # crisp on top.
     if "surplus" in show:
         ax.fill_between(
             grid, consumption_w, production_w,
@@ -228,15 +211,18 @@ def render_power_chart(
         ax.plot(grid, import_w, label="Import", color="orange")
     if "export" in show:
         ax.plot(grid, export_w, label="Export", color="blue")
+    if "net_import" in show:
+        ax.plot(grid, net_import_w, label="Net import", color="purple")
     if "production" in show:
         ax.plot(grid, production_w, label="Production", color="green")
     if "consumption" in show:
         ax.plot(grid, consumption_w, label="Consumption", color="red")
-    ax.set_ylim(bottom=0)
+    # Net import can go negative (net-exporting), so the axis can't be
+    # floored at 0 the way the all-non-negative gross signals used to allow
+    # - a zero line instead marks the boundary.
+    ax.axhline(0, color="black", linewidth=0.8)
     ax.set_ylabel("W")
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines + lines2, labels + labels2, loc="upper right", fontsize="small")
+    ax.legend(loc="upper right", fontsize="small")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LOCAL_TZ))
     # Minor ticks every 10 minutes for finer-grained reading, unlabeled so
     # they don't clutter a full-day window (only the major ticks get text).
@@ -254,10 +240,7 @@ def render_power_chart(
         f"Net-exporting {_fmt_pct(totals['net_exporting_share'])} of samples",
     ]
     if totals["pv_production_wh"] is not None:
-        title_lines.append(
-            f"PV production {_fmt_kwh(totals['pv_production_wh'])}  |  "
-            f"Self-consumption {_fmt_pct(totals['self_consumption_ratio'])}"
-        )
+        title_lines.append(f"PV production {_fmt_kwh(totals['pv_production_wh'])}")
     ax.set_title("\n".join(title_lines), fontsize=8)
 
     fig.tight_layout()
@@ -282,28 +265,24 @@ def render_trends_chart(
     "yearly" one) so this uses categorical x-ticks, not a datetime axis.
 
     `signals` (from TREND_SIGNALS) restricts which bars get drawn; None
-    (default) draws all five. Consumed is derived the same way as
-    stats.compute_stats: produced + imported - exported.
+    (default) draws DEFAULT_TREND_SIGNALS (gross imported/exported hidden,
+    same rationale as the power chart - net_import is what's actually
+    billed). consumed_wh/net_import_wh are read straight from
+    aggregates.energy_totals(), which already derives them from the
+    confirmed net-metering identity.
     """
-    show = TREND_SIGNALS if signals is None else signals
+    show = DEFAULT_TREND_SIGNALS if signals is None else signals
 
     labels = []
     values = {name: [] for name in TREND_SIGNALS}
     for label, since, until in buckets:
         totals = energy_totals(conn, since, until)
-        imported_wh = totals["imported_wh"]
-        exported_wh = totals["exported_wh"]
-        produced_wh = totals["pv_production_wh"]
-        consumed_wh = (
-            produced_wh + imported_wh - exported_wh
-            if None not in (produced_wh, imported_wh, exported_wh)
-            else None
-        )
         labels.append(label)
-        values["imported"].append(_kwh_or_nan(imported_wh))
-        values["exported"].append(_kwh_or_nan(exported_wh))
-        values["produced"].append(_kwh_or_nan(produced_wh))
-        values["consumed"].append(_kwh_or_nan(consumed_wh))
+        values["imported"].append(_kwh_or_nan(totals["imported_wh"]))
+        values["exported"].append(_kwh_or_nan(totals["exported_wh"]))
+        values["net_import"].append(_kwh_or_nan(totals["net_import_wh"]))
+        values["produced"].append(_kwh_or_nan(totals["pv_production_wh"]))
+        values["consumed"].append(_kwh_or_nan(totals["consumed_wh"]))
         values["surplus"].append(_kwh_or_nan(totals["net_export_wh"]))
 
     fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
@@ -316,7 +295,7 @@ def render_trends_chart(
     bar_width = 0.8 / max(len(shown), 1)
     for i, name in enumerate(shown):
         offsets = [xi + (i - (len(shown) - 1) / 2) * bar_width for xi in x]
-        ax.bar(offsets, values[name], width=bar_width, label=name.capitalize(), color=TREND_COLORS[name])
+        ax.bar(offsets, values[name], width=bar_width, label=_trend_label(name), color=TREND_COLORS[name])
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
@@ -324,7 +303,7 @@ def render_trends_chart(
     ax.legend(loc="upper right", fontsize="small")
 
     totals_line = "  |  ".join(
-        f"{name.capitalize()} {sum(v for v in values[name] if v == v):.1f} kWh"  # v == v filters NaN
+        f"{_trend_label(name)} {sum(v for v in values[name] if v == v):.1f} kWh"  # v == v filters NaN
         for name in shown
     )
     ax.set_title(totals_line, fontsize=8)
@@ -338,6 +317,10 @@ def render_trends_chart(
 
 def _kwh_or_nan(wh: float | None) -> float:
     return wh / 1000 if wh is not None else float("nan")
+
+
+def _trend_label(name: str) -> str:
+    return name.replace("_", " ").capitalize()
 
 
 def render_phase_chart(

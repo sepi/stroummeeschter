@@ -10,14 +10,13 @@ Consumption on purpose, each gets both a power view and an energy view:
   series chart.py uses, expensive as "total" grows over months of history,
   so only its average is included (see below); min/max consumption is a
   future addition if it's wanted badly enough to justify the cost.
-- imported/exported/produced/consumed/net-export (Wh) for every horizon:
-  imported/exported/produced reused as-is from aggregates.energy_totals()
-  (cheap for any window); consumed_wh = produced + imported - exported
-  (the same energy-balance identity chart.py's Consumption line uses,
-  here as a plain total rather than a resampled series). avg_consumption_w
-  is just consumed_wh / horizon duration - avg power = energy / time.
-- self-consumption ratio, net-exporting share: reused as-is from
-  aggregates.energy_totals().
+- imported/exported/produced/consumed/net-import/net-export (Wh) and
+  net-exporting share for every horizon: all reused as-is from
+  aggregates.energy_totals() - it already derives consumed_wh from the
+  confirmed net-metering identity, no duplicate math here.
+  avg_consumption_w is just consumed_wh / horizon duration - avg power =
+  energy / time. No self-consumption ratio: under confirmed net metering
+  it wouldn't correspond to anything actually billed - see aggregates.py.
 """
 
 from __future__ import annotations
@@ -63,10 +62,7 @@ def _earliest_recorded_at(conn: sqlite3.Connection) -> str | None:
 
 def _horizon_stats(conn: sqlite3.Connection, since: str, until: str, hours: float | None) -> dict:
     totals = energy_totals(conn, since, until)
-
-    consumed_wh = None
-    if None not in (totals["pv_production_wh"], totals["imported_wh"], totals["exported_wh"]):
-        consumed_wh = totals["pv_production_wh"] + totals["imported_wh"] - totals["exported_wh"]
+    consumed_wh = totals["consumed_wh"]
     avg_consumption_w = consumed_wh / hours if (consumed_wh is not None and hours) else None
 
     return {
@@ -80,9 +76,9 @@ def _horizon_stats(conn: sqlite3.Connection, since: str, until: str, hours: floa
         "exported_wh": totals["exported_wh"],
         "produced_wh": totals["pv_production_wh"],
         "consumed_wh": consumed_wh,
+        "net_import_wh": totals["net_import_wh"],
         "net_export_wh": totals["net_export_wh"],
         "net_exporting_share": totals["net_exporting_share"],
-        "self_consumption_ratio": totals["self_consumption_ratio"],
     }
 
 
