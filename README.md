@@ -287,7 +287,7 @@ them explicitly via `--signals`/`signals=` to see them.
 
 ### Chart types and signals
 
-**`power`** (default): six possible signals, each independently
+**`power`** (default): seven possible signals, each independently
 toggleable via `--signals`/`signals=` (comma-separated; omit for the
 default subset below):
 
@@ -295,6 +295,9 @@ default subset below):
 - **Net import** (purple, shown by default) - In. Can go negative (net
   exporting), so unlike the all-non-negative signals below, the y-axis
   isn't floored at 0 - a black zero line marks the boundary instead.
+- **Net export** (teal, hidden by default) - En = -In, the same line
+  mirrored around 0; shown by default alongside Net import would just be
+  redundant, but available for anyone who thinks in terms of export.
 - **Production** (green) - P, read directly from Envoy.
 - **Consumption** (solid red) - C = In + P, plotted *positive* alongside
   Production so a surplus/deficit shows up directly as which line is on

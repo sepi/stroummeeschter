@@ -89,15 +89,24 @@ def test_render_power_chart_with_production_data(conn):
 
 def test_default_power_signals_hide_gross_import_export():
     # Confirmed net-metered billing: gross import/export aren't interesting
-    # day to day - the default view shows net_import instead.
+    # day to day - the default view shows net_import instead. net_export is
+    # the same line mirrored, also hidden to avoid redundant default clutter.
     assert "import" not in DEFAULT_POWER_SIGNALS
     assert "export" not in DEFAULT_POWER_SIGNALS
+    assert "net_export" not in DEFAULT_POWER_SIGNALS
     assert "net_import" in DEFAULT_POWER_SIGNALS
 
 
 def test_render_power_chart_with_gross_signals_explicitly_requested(conn):
     png = render_power_chart(
         conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", signals={"import", "export"}
+    )
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_render_power_chart_with_net_export_explicitly_requested(conn):
+    png = render_power_chart(
+        conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", signals={"net_export"}
     )
     assert png.startswith(PNG_MAGIC)
 

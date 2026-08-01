@@ -30,12 +30,15 @@ LOCAL_TZ = ZoneInfo("Europe/Luxembourg")
 PHASES = (1, 2, 3)
 PHASE_LINESTYLES = {1: "-", 2: "--", 3: "-."}
 
-POWER_SIGNALS = ("import", "export", "net_import", "production", "consumption", "surplus")
+POWER_SIGNALS = ("import", "export", "net_import", "net_export", "production", "consumption", "surplus")
 # Billing is confirmed net-metered (net_import = import - export is what's
 # actually billed) - the gross Import/Export lines aren't very interesting
 # to look at day to day, so they're hidden unless explicitly requested via
-# --signals; net_import is shown instead.
-DEFAULT_POWER_SIGNALS = tuple(s for s in POWER_SIGNALS if s not in ("import", "export"))
+# --signals; net_import is shown instead. net_export = -net_import is the
+# same line mirrored around 0 - also hidden by default (redundant with
+# net_import when both would just show), available for anyone who thinks
+# in terms of export rather than import.
+DEFAULT_POWER_SIGNALS = tuple(s for s in POWER_SIGNALS if s not in ("import", "export", "net_export"))
 PHASE_SIGNALS = tuple(f"phase{p}_{direction}" for p in PHASES for direction in ("import", "export"))
 PHASE_COLORS = {"import": "orange", "export": "blue"}
 
@@ -213,6 +216,8 @@ def render_power_chart(
         ax.plot(grid, export_w, label="Export", color="blue")
     if "net_import" in show:
         ax.plot(grid, net_import_w, label="Net import", color="purple")
+    if "net_export" in show:
+        ax.plot(grid, -net_import_w, label="Net export", color="teal")
     if "production" in show:
         ax.plot(grid, production_w, label="Production", color="green")
     if "consumption" in show:
