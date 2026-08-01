@@ -12,6 +12,7 @@ from stroummeeschter.chart import (
     DEFAULT_TREND_SIGNALS,
     _fetch_series,
     _resample,
+    _shift_by_minutes,
     _time_grid,
     render_phase_chart,
     render_power_chart,
@@ -109,6 +110,46 @@ def test_render_power_chart_with_net_export_explicitly_requested(conn):
         conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", signals={"net_export"}
     )
     assert png.startswith(PNG_MAGIC)
+
+
+def test_render_power_chart_with_prod_shift_returns_valid_png(conn):
+    db.upsert_entity(conn, "envoy-production_w", "2026-07-25T00:00:00+00:00", unit="W", category=0)
+    db.insert_reading(conn, "envoy-production_w", 3000.0, "2026-07-25T08:00:02+00:00")
+    conn.commit()
+
+    png = render_power_chart(
+        conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00", prod_shift_min=5.0
+    )
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_shift_by_minutes_zero_is_a_noop():
+    grid = pd.date_range("2026-07-25T08:00:00+00:00", periods=5, freq="10s")
+    series = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=grid)
+    result = _shift_by_minutes(series, 0.0)
+    assert result is series
+
+
+def test_shift_by_minutes_positive_moves_curve_left_toward_the_past():
+    # Positive minutes must move the curve left (toward the past): a value
+    # that used to appear later should now appear earlier - i.e. at grid
+    # position 0, we should see what used to be at position +1 (one 10s
+    # grid step = 1/6 minute), pulling a "future" reading backward.
+    grid = pd.date_range("2026-07-25T08:00:00+00:00", periods=5, freq="10s")
+    series = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0], index=grid)
+    result = _shift_by_minutes(series, 10 / 60)  # exactly one 10s grid step
+    assert result.iloc[0] == 20.0
+    assert result.iloc[1] == 30.0
+    assert math.isnan(result.iloc[-1])  # nothing further in the future to pull from
+
+
+def test_shift_by_minutes_negative_moves_curve_right_toward_the_future():
+    grid = pd.date_range("2026-07-25T08:00:00+00:00", periods=5, freq="10s")
+    series = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0], index=grid)
+    result = _shift_by_minutes(series, -10 / 60)
+    assert math.isnan(result.iloc[0])
+    assert result.iloc[1] == 10.0
+    assert result.iloc[2] == 20.0
 
 
 def test_fetch_series_returns_a_series_indexed_by_time(conn):

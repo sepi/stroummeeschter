@@ -61,6 +61,18 @@ def test_chart_png_with_explicit_date(server):
     assert resp.content.startswith(PNG_MAGIC)
 
 
+def test_chart_png_supports_prod_shift_min(server):
+    resp = requests.get(server + "/chart.png", params={"prod_shift_min": "5.5"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_clamps_out_of_range_prod_shift_min(server):
+    resp = requests.get(server + "/chart.png", params={"prod_shift_min": "99999"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
 def test_chart_png_rejects_unknown_chart_type(server):
     resp = requests.get(server + "/chart.png", params={"chart": "nonsense"}, timeout=5)
     assert resp.status_code == 400

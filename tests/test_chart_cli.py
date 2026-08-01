@@ -110,3 +110,33 @@ def test_write_chart_supports_trends_chart(tmp_path):
 
     with open(out_path, "rb") as f:
         assert f.read(8) == PNG_MAGIC
+
+
+def test_write_chart_supports_prod_shift_min(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    out_path = str(tmp_path / "power.png")
+    _seed(db_path)
+
+    write_chart(db_path, out_path, hours=24, width_px=300, height_px=200, prod_shift_min=5.0)
+
+    with open(out_path, "rb") as f:
+        assert f.read(8) == PNG_MAGIC
+
+
+def test_write_chart_ignores_prod_shift_min_for_phases(tmp_path):
+    # prod_shift_min only makes sense for --chart power; passing it for
+    # other chart types must not error (render_png only threads it through
+    # for chart == "power").
+    db_path = str(tmp_path / "test.db")
+    out_path = str(tmp_path / "phases.png")
+    conn = db.connect(db_path)
+    db.init_db(conn)
+    db.upsert_entity(conn, "sensor-power_consumed_phase_1", "2026-07-25T00:00:00+00:00", unit="W", category=0)
+    db.insert_reading(conn, "sensor-power_consumed_phase_1", 500.0, "2026-07-25T08:00:00+00:00")
+    conn.commit()
+    conn.close()
+
+    write_chart(db_path, out_path, hours=24, width_px=300, height_px=200, chart="phases", prod_shift_min=5.0)
+
+    with open(out_path, "rb") as f:
+        assert f.read(8) == PNG_MAGIC

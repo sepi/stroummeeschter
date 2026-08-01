@@ -30,7 +30,7 @@ LOCAL_TZ = ZoneInfo("Europe/Luxembourg")
 PHASES = (1, 2, 3)
 PHASE_LINESTYLES = {1: "-", 2: "--", 3: "-."}
 
-POWER_SIGNALS = ("import", "export", "net_import", "net_export", "production", "consumption", "surplus")
+POWER_SIGNALS = ("import", "export", "net_import", "net_export", "production", "consumption")
 # Billing is confirmed net-metered (net_import = import - export is what's
 # actually billed) - the gross Import/Export lines aren't very interesting
 # to look at day to day, so they're hidden unless explicitly requested via
@@ -139,6 +139,20 @@ def _resample(
     return series.reindex(grid, method="ffill", tolerance=max_gap)
 
 
+def _shift_by_minutes(series: pd.Series, minutes: float) -> pd.Series:
+    """Shift `series` (already resampled onto the regular RESAMPLE_FREQ grid)
+    by `minutes` - a no-op at minutes=0. Positive minutes moves the series
+    left/toward the past: shift(periods=-n) moves a value that was at
+    position i+n back to position i, i.e. pulls a later ("more future")
+    reading backward in time. See render_power_chart's prod_shift_min
+    docstring for why (and why this is diagnostic, not a real fix)."""
+    if not minutes:
+        return series
+    grid_step_s = pd.Timedelta(RESAMPLE_FREQ).total_seconds()
+    steps = round(minutes * 60 / grid_step_s)
+    return series.shift(-steps)
+
+
 def _phase_exporting_shares(conn: sqlite3.Connection, since: str, until: str) -> dict[int, float | None]:
     grid = _time_grid(since, until)
     shares = {}
@@ -157,6 +171,7 @@ def render_power_chart(
     totals_since: str | None = None,
     totals_until: str | None = None,
     signals: set[str] | None = None,
+    prod_shift_min: float = 0.0,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
@@ -167,11 +182,20 @@ def render_power_chart(
     plotted, so "today's totals" stays meaningful even when zoomed into a
     shorter window (see chart_cli.write_chart).
 
-    `signals` (from POWER_SIGNALS) restricts which lines/fills get drawn;
+    `signals` (from POWER_SIGNALS) restricts which lines get drawn;
     None (default) draws DEFAULT_POWER_SIGNALS (gross import/export hidden -
     pass them explicitly via --signals to see them). Everything is still
     computed regardless - the title's aggregates never depend on what's
-    toggled on for display."""
+    toggled on for display.
+
+    `prod_shift_min` is an experimental diagnostic knob (not a real fix -
+    see the module docstring's note on why a fixed shift doesn't cleanly
+    correct the lag/under-response artifact, from manually grid-searching
+    it): shifts the Production line (and what feeds Consumption) by this
+    many minutes. Positive shifts it left/toward the past - i.e. a
+    currently-recorded reading is displayed as if it happened this long
+    ago, which is what you'd want if Production is lagging behind the
+    near-instant grid readings. 0 (default) applies no shift."""
     totals_since = totals_since or since
     totals_until = totals_until or until
     show = DEFAULT_POWER_SIGNALS if signals is None else signals
@@ -188,6 +212,9 @@ def render_power_chart(
     # gets displayed as the raw Production line.
     production_w_fresh = _resample(conn, ENTITY_PRODUCTION_W, since, until, grid, max_gap=DERIVED_MAX_GAP)
 
+    production_w = _shift_by_minutes(production_w, prod_shift_min)
+    production_w_fresh = _shift_by_minutes(production_w_fresh, prod_shift_min)
+
     # C = In + P (energy balance at any instant); plotted positive, alongside
     # Production, so a surplus/deficit shows up directly as which line is on
     # top - no sign-reading required.
@@ -198,17 +225,6 @@ def render_power_chart(
     fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     ax.set_axisbelow(True)
     ax.grid(True, which="major", linewidth=0.5, alpha=0.5)
-
-    # Surplus: S = max(0, En) = max(0, -In) = P - C whenever production is
-    # ahead - drawn as the gap between the Production/Consumption lines
-    # (rather than a flat 0-baseline fill) so it's visually anchored at the
-    # height those lines are actually at; behind the lines so they stay
-    # crisp on top.
-    if "surplus" in show:
-        ax.fill_between(
-            grid, consumption_w, production_w,
-            where=(production_w > consumption_w), color="blue", alpha=0.15, label="Surplus",
-        )
 
     if "import" in show:
         ax.plot(grid, import_w, label="Import", color="orange")
@@ -246,6 +262,10 @@ def render_power_chart(
     ]
     if totals["pv_production_wh"] is not None:
         title_lines.append(f"PV production {_fmt_kwh(totals['pv_production_wh'])}")
+    if prod_shift_min:
+        # Self-documenting: a shifted chart must never look indistinguishable
+        # from an unshifted one - see prod_shift_min's docstring note.
+        title_lines.append(f"[experimental: Production shifted {prod_shift_min:+.1f} min]")
     ax.set_title("\n".join(title_lines), fontsize=8)
 
     fig.tight_layout()

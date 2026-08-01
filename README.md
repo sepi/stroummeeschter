@@ -218,7 +218,7 @@ Two ways to get a chart, sharing all their rendering logic
 stroummeeschter-web --db stroummeeschter.db --port 8080
 ```
 
-- `GET /chart.png?chart=power|phases|trends&hours=&date=&day_start_hour=&width=&height=&signals=&period=&count=` -
+- `GET /chart.png?chart=power|phases|trends&hours=&date=&day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=` -
   the chart itself, generated fresh on every request (always current,
   every CLI option below available as a query param). Point rafthercal's
   `ImagePlugin` (`IMAGE_URL` config) at this for printing, or fetch it
@@ -227,9 +227,10 @@ stroummeeschter-web --db stroummeeschter.db --port 8080
 - `GET /` - an interactive page: chart-type selector, per-signal
   checkboxes (2x3 grid, swaps between power/phase/trend signals - gross
   import/export start unchecked, matching the CLI default), an hours
-  override, a period selector (for `trends`), a live stats table
-  (toggleable, at the bottom), auto-resizes to the browser window, and
-  refreshes every 30s (and on resize/control change).
+  override, a period selector (for `trends`), an experimental Prod shift
+  input (power chart only - see below), a live stats table (toggleable,
+  at the bottom), auto-resizes to the browser window, and refreshes every
+  30s (and on resize/control change).
 
 `--host` defaults to `0.0.0.0` (LAN-reachable, no auth) and `--port`
 defaults to `8080` (env `STROUMMEESCHTER_WEB_HOST` / `_WEB_PORT`) - this
@@ -247,8 +248,8 @@ stroummeeschter-chart --db stroummeeschter.db --out power.png --interval 60
 Writes atomically (temp file + rename) so a concurrent reader never sees
 a half-written PNG. Same options as the query params above, as CLI flags
 (`--chart`, `--hours`, `--day-start-hour`, `--date`, `--width`, `--height`,
-`--signals`, `--period`, `--count`), plus `--interval` (omit to render once
-and exit).
+`--signals`, `--period`, `--count`, `--prod-shift-min`), plus `--interval`
+(omit to render once and exit).
 
 ### Time window
 
@@ -287,7 +288,7 @@ them explicitly via `--signals`/`signals=` to see them.
 
 ### Chart types and signals
 
-**`power`** (default): seven possible signals, each independently
+**`power`** (default): six possible signals, each independently
 toggleable via `--signals`/`signals=` (comma-separated; omit for the
 default subset below):
 
@@ -302,8 +303,31 @@ default subset below):
 - **Consumption** (solid red) - C = In + P, plotted *positive* alongside
   Production so a surplus/deficit shows up directly as which line is on
   top, rather than needing to read a sign.
-- **Surplus** - a transparent blue fill between Consumption and
-  Production wherever production is ahead (S = max(0, En) = P - C).
+
+No Surplus fill on this chart: on hardware without a CT clamp (see
+above), Production is sourced from the slow, staggered microinverter
+aggregate, which measurably lags/under-responds during rising-production
+transients relative to the near-instant grid reading - confirmed against
+real data (excursions of -2599W). Surplus is defined in terms of that same
+Production-vs-Consumption relationship, so it inherited the same artifact
+and was removed. The trends chart's Surplus (below) isn't affected - it's
+computed from cumulative energy counters, not this noisy instantaneous
+comparison.
+
+**`--prod-shift-min`/`prod_shift_min=` (power chart only, EXPERIMENTAL)** -
+shifts the Production line (and what feeds Consumption) by this many
+minutes; a float, default `0`. Positive shifts it left/toward the past -
+i.e. a currently-recorded reading is displayed as if it happened this long
+ago, which is the direction you'd want if Production is lagging behind
+the near-instant grid readings (see above). This is a diagnostic knob for
+poking at the data, **not a real fix**: manually grid-searching it against
+5.5 days of real data found no clean single value that corrects the
+artifact - the metric kept improving all the way to the edge of a 15-minute
+search without leveling off, which points to variable smoothing/
+under-response during transients rather than a fixed delay a constant
+shift could correct. A shifted chart always says so in its title
+(`[experimental: Production shifted +N min]`) so it's never mistaken for
+an unshifted one.
 
 There's deliberately no self-consumption ratio: under confirmed net
 metering every Wh of production reduces In 1:1 whether it was used

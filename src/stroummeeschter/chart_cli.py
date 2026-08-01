@@ -66,6 +66,7 @@ def render_png(
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
+    prod_shift_min: float = 0.0,
 ) -> bytes:
     """Resolve the time window and render one chart to PNG bytes. Shared by
     the file-writing CLI below and webapp.py's on-demand HTTP endpoint, so
@@ -77,7 +78,10 @@ def render_png(
 
     `period`/`count` only apply to --chart trends: buckets aren't points on
     a since/until timeline like power/phases are, so that chart bypasses
-    the day-window resolution below entirely."""
+    the day-window resolution below entirely.
+
+    `prod_shift_min` only applies to --chart power - see
+    render_power_chart's docstring."""
     signal_set = {s.strip() for s in signals.split(",") if s.strip()} if signals else None
 
     if chart == "trends":
@@ -112,6 +116,8 @@ def render_png(
     else:
         since, until = totals_since, totals_until
 
+    extra_kwargs = {"prod_shift_min": prod_shift_min} if chart == "power" else {}
+
     conn = db.connect(db_path)
     db.init_db(conn)
     try:
@@ -124,6 +130,7 @@ def render_png(
             signals=signal_set,
             width_px=width_px,
             height_px=height_px,
+            **extra_kwargs,
         )
     finally:
         conn.close()
@@ -141,6 +148,7 @@ def write_chart(
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
+    prod_shift_min: float = 0.0,
 ) -> None:
     png = render_png(
         db_path,
@@ -153,6 +161,7 @@ def write_chart(
         signals=signals,
         period=period,
         count=count,
+        prod_shift_min=prod_shift_min,
     )
 
     # Write via a temp file + atomic rename so a concurrent reader (a static
@@ -222,6 +231,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of buckets for --chart trends (default depends on --period: "
         f"{TREND_DEFAULT_COUNT}). Ignored otherwise.",
     )
+    parser.add_argument(
+        "--prod-shift-min",
+        type=float,
+        default=0.0,
+        help="EXPERIMENTAL diagnostic knob, --chart power only: shift the Production line by this "
+        "many minutes (float; positive shifts it left/toward the past - i.e. a currently-recorded "
+        "reading is displayed as if it happened this long ago). Not a real fix for the "
+        "Production-lags-the-grid artifact (see chart.py render_power_chart docstring) - grid-searching "
+        "this by hand found no clean single value that corrects it, just for poking at the data. "
+        "Default 0 (no shift).",
+    )
     parser.add_argument("--width", type=int, default=1600, help="Image width in pixels (default: %(default)s)")
     parser.add_argument("--height", type=int, default=400, help="Image height in pixels (default: %(default)s)")
     parser.add_argument(
@@ -253,6 +273,7 @@ def main(argv: list[str] | None = None) -> None:
         signals=args.signals,
         period=args.period,
         count=args.count,
+        prod_shift_min=args.prod_shift_min,
     )
 
     if args.interval is None:

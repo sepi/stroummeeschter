@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 MIN_DIMENSION_PX = 100
 MAX_DIMENSION_PX = 3000
 MAX_HOURS = 24 * 30
+MAX_PROD_SHIFT_MIN = 60.0
 
 REFRESH_MS = 30_000
 
@@ -99,6 +100,10 @@ _INDEX_HTML = f"""<!doctype html>
   {_signal_checkboxes(TREND_SIGNALS, checked=DEFAULT_TREND_SIGNALS)}
   </div>
   <label id="hours-label">Hours: <input type="number" id="hours" placeholder="full day" style="width:5em"></label>
+  <label id="prod-shift-label" title="Experimental diagnostic - shifts the Production line by this many minutes; positive = toward the past. Not a real fix, see chart.py.">
+    Prod shift (min, experimental):
+    <input type="number" id="prod-shift" step="0.1" value="0" style="width:5em">
+  </label>
   <label><input type="checkbox" id="show-stats"> Stats</label>
 </div>
 <div id="chart-wrap"><img id="chart-img"></div>
@@ -112,6 +117,8 @@ _INDEX_HTML = f"""<!doctype html>
   var trendSignals = document.getElementById('trend-signals');
   var hoursLabel = document.getElementById('hours-label');
   var hoursInput = document.getElementById('hours');
+  var prodShiftLabel = document.getElementById('prod-shift-label');
+  var prodShiftInput = document.getElementById('prod-shift');
   var periodLabel = document.getElementById('period-label');
   var period = document.getElementById('period');
   var showStats = document.getElementById('show-stats');
@@ -129,6 +136,7 @@ _INDEX_HTML = f"""<!doctype html>
     phaseSignals.style.display = isPhases ? '' : 'none';
     trendSignals.style.display = isTrends ? '' : 'none';
     hoursLabel.style.display = isTrends ? 'none' : '';
+    prodShiftLabel.style.display = (isPhases || isTrends) ? 'none' : '';
     periodLabel.style.display = isTrends ? '' : 'none';
 
     var signalContainer = isTrends ? trendSignals : (isPhases ? phaseSignals : powerSignals);
@@ -140,8 +148,11 @@ _INDEX_HTML = f"""<!doctype html>
     params.set('signals', signals.join(','));
     if (isTrends) {{
       params.set('period', period.value);
-    }} else if (hoursInput.value) {{
-      params.set('hours', hoursInput.value);
+    }} else {{
+      if (hoursInput.value) params.set('hours', hoursInput.value);
+      if (!isPhases && prodShiftInput.value && Number(prodShiftInput.value) !== 0) {{
+        params.set('prod_shift_min', prodShiftInput.value);
+      }}
     }}
     params.set('t', Date.now());  // cache-bust: always refetch, never a stale cached image
     img.src = '/chart.png?' + params.toString();
@@ -197,6 +208,7 @@ _INDEX_HTML = f"""<!doctype html>
 
   chartType.addEventListener('change', updateSrc);
   hoursInput.addEventListener('change', updateSrc);
+  prodShiftInput.addEventListener('change', updateSrc);
   period.addEventListener('change', updateSrc);
   Array.prototype.forEach.call(document.querySelectorAll('input[data-signal]'), function (el) {{
     el.addEventListener('change', updateSrc);
@@ -236,6 +248,14 @@ def _query_int(query: dict, key: str, default: int, lo: int, hi: int) -> int:
     except (KeyError, IndexError, ValueError):
         return default
     return int(_clamp(value, lo, hi))
+
+
+def _query_float(query: dict, key: str, default: float, lo: float, hi: float) -> float:
+    try:
+        value = float(query[key][0])
+    except (KeyError, IndexError, ValueError):
+        return default
+    return _clamp(value, lo, hi)
 
 
 def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
@@ -304,6 +324,7 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 self.send_error(400, f"unknown period '{period}', expected one of {TREND_PERIODS}")
                 return
             count = _query_int(query, "count", TREND_DEFAULT_COUNT[period], 1, 366)
+            prod_shift_min = _query_float(query, "prod_shift_min", 0.0, -MAX_PROD_SHIFT_MIN, MAX_PROD_SHIFT_MIN)
 
             png = render_png(
                 db_path,
@@ -316,6 +337,7 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 signals=signals,
                 period=period,
                 count=count,
+                prod_shift_min=prod_shift_min,
             )
 
             self.send_response(200)
@@ -339,7 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stroummeeschter-web",
         description="Serve charts on demand over HTTP (GET /chart.png?chart=power|phases|trends&hours=&date=&"
-        "day_start_hour=&width=&height=&signals=&period=&count=).",
+        "day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=).",
     )
     parser.add_argument(
         "--db",
