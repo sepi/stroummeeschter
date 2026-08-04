@@ -42,13 +42,19 @@ DEFAULT_POWER_SIGNALS = tuple(s for s in POWER_SIGNALS if s not in ("import", "e
 PHASE_SIGNALS = tuple(f"phase{p}_{direction}" for p in PHASES for direction in ("import", "export"))
 PHASE_COLORS = {"import": "orange", "export": "blue"}
 
-TREND_SIGNALS = ("imported", "exported", "net_import", "produced", "consumed", "surplus")
-DEFAULT_TREND_SIGNALS = tuple(s for s in TREND_SIGNALS if s not in ("imported", "exported"))
+TREND_SIGNALS = ("imported", "exported", "net_import", "produced", "consumed", "surplus", "balance_worst", "balance_best")
+# balance_worst/balance_best need import_price_min/max and export_price_min/max
+# to be anything but empty bars (see render_trends_chart) - hidden by
+# default alongside gross imported/exported for the same "not useful
+# without extra input" reasoning.
+DEFAULT_TREND_SIGNALS = tuple(s for s in TREND_SIGNALS if s not in ("imported", "exported", "balance_worst", "balance_best"))
 # Import/Export/Production/net_import keep their colors from the power
 # chart for consistency; Consumption switches from red-line to a distinct
 # bar color since red-as-line vs red-as-bar read very differently at a
 # glance, and Surplus gets its own color here since it's a full bar (can go
 # negative), not the transparent overlay fill it is on the power chart.
+# balance_worst/balance_best plot on a separate currency axis (see
+# render_trends_chart) - distinct colors so they don't read as more kWh bars.
 TREND_COLORS = {
     "imported": "orange",
     "exported": "blue",
@@ -56,6 +62,8 @@ TREND_COLORS = {
     "produced": "green",
     "consumed": "firebrick",
     "surplus": "gray",
+    "balance_worst": "crimson",
+    "balance_best": "seagreen",
 }
 
 # All signals get resampled onto one regular grid at this resolution -
@@ -364,21 +372,17 @@ def render_trends_chart(
     confirmed net-metering identity.
 
     `import_price_min/max`/`export_price_min/max` (optional, see
-    render_power_chart): if all four are given, a worst/best-case Balance
-    for the *whole* window (summed imported/exported across every bucket,
-    regardless of which bars are toggled for display) is added to the
-    title - a flat price times a per-bucket-netted total isn't the same
-    as pricing each bucket separately and summing, but since the price
-    itself is assumed constant across the window here, it is exactly
-    equivalent (only time-varying pricing would need to be applied
-    per-bucket).
+    render_power_chart): if all four are given, `balance_worst`/
+    `balance_best` become real per-bucket bars (each bucket's own
+    imported_wh/exported_wh priced independently, not a single figure for
+    the whole window) - plotted on a separate right-hand axis since
+    they're a currency, not kWh. Without prices these two are just empty
+    (NaN) bars if selected via `signals`.
     """
     show = DEFAULT_TREND_SIGNALS if signals is None else signals
 
     labels = []
     values = {name: [] for name in TREND_SIGNALS}
-    total_imported_wh = 0.0
-    total_exported_wh = 0.0
     for label, since, until in buckets:
         totals = energy_totals(conn, since, until)
         labels.append(label)
@@ -388,38 +392,42 @@ def render_trends_chart(
         values["produced"].append(_kwh_or_nan(totals["pv_production_wh"]))
         values["consumed"].append(_kwh_or_nan(totals["consumed_wh"]))
         values["surplus"].append(_kwh_or_nan(totals["net_export_wh"]))
-        total_imported_wh += totals["imported_wh"] or 0.0
-        total_exported_wh += totals["exported_wh"] or 0.0
+        balance = _money_balance(
+            totals["imported_wh"], totals["exported_wh"],
+            import_price_min, import_price_max, export_price_min, export_price_max,
+        )
+        values["balance_worst"].append(balance[0] if balance else float("nan"))
+        values["balance_best"].append(balance[1] if balance else float("nan"))
 
     fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     ax.set_axisbelow(True)
     ax.grid(True, which="major", axis="y", linewidth=0.5, alpha=0.5)
     ax.axhline(0, color="black", linewidth=0.8)
+    ax2 = ax.twinx()
 
+    balance_names = {"balance_worst", "balance_best"}
     shown = [name for name in TREND_SIGNALS if name in show]
     x = range(len(labels))
     bar_width = 0.8 / max(len(shown), 1)
     for i, name in enumerate(shown):
         offsets = [xi + (i - (len(shown) - 1) / 2) * bar_width for xi in x]
-        ax.bar(offsets, values[name], width=bar_width, label=_trend_label(name), color=TREND_COLORS[name])
+        target = ax2 if name in balance_names else ax
+        target.bar(offsets, values[name], width=bar_width, label=_trend_label(name), color=TREND_COLORS[name])
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("kWh")
-    ax.legend(loc="upper right", fontsize="small")
+    ax2.set_ylabel("Balance")
+    lines, labels_ = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels_ + labels2, loc="upper right", fontsize="small")
 
     totals_line = "  |  ".join(
-        f"{_trend_label(name)} {sum(v for v in values[name] if v == v):.1f} kWh"  # v == v filters NaN
+        f"{_trend_label(name)} {sum(v for v in values[name] if v == v):.1f}"  # v == v filters NaN
+        f"{' kWh' if name not in balance_names else ''}"
         for name in shown
     )
-    balance_line = _fmt_balance(
-        _money_balance(
-            total_imported_wh, total_exported_wh,
-            import_price_min, import_price_max, export_price_min, export_price_max,
-        )
-    )
-    title = f"{totals_line}\n{balance_line}" if balance_line else totals_line
-    ax.set_title(title, fontsize=8)
+    ax.set_title(totals_line, fontsize=8)
 
     fig.tight_layout()
     buf = io.BytesIO()
