@@ -218,7 +218,7 @@ Two ways to get a chart, sharing all their rendering logic
 stroummeeschter-web --db stroummeeschter.db --port 8080
 ```
 
-- `GET /chart.png?chart=power|phases|trends&hours=&date=&day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=` -
+- `GET /chart.png?chart=power|phases|trends&hours=&date=&day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=&import_price_min=&import_price_max=&export_price_min=&export_price_max=` -
   the chart itself, generated fresh on every request (always current,
   every CLI option below available as a query param). Point rafthercal's
   `ImagePlugin` (`IMAGE_URL` config) at this for printing, or fetch it
@@ -227,8 +227,12 @@ stroummeeschter-web --db stroummeeschter.db --port 8080
   checkboxes (2x3 grid, swaps between power/phase/trend signals - gross
   import/export start unchecked, matching the CLI default), an hours
   override, a period selector (for `trends`), an experimental Prod shift
-  input (power chart only - see below), auto-resizes to the browser
-  window, and refreshes every 30s (and on resize/control change).
+  input (power chart only - see below), import/export min/max price
+  inputs (power and trends - see [Money balance](#money-balance)),
+  auto-resizes to the browser window, and refreshes every 30s (and on
+  resize/control change). Prod shift and the four price inputs are
+  remembered per-browser via `localStorage`, so they stick across reloads
+  instead of reverting to blank/defaults.
 
 `--host` defaults to `0.0.0.0` (LAN-reachable, no auth) and `--port`
 defaults to `8080` (env `STROUMMEESCHTER_WEB_HOST` / `_WEB_PORT`) - this
@@ -246,8 +250,9 @@ stroummeeschter-chart --db stroummeeschter.db --out power.png --interval 60
 Writes atomically (temp file + rename) so a concurrent reader never sees
 a half-written PNG. Same options as the query params above, as CLI flags
 (`--chart`, `--hours`, `--day-start-hour`, `--date`, `--width`, `--height`,
-`--signals`, `--period`, `--count`, `--prod-shift-min`), plus `--interval`
-(omit to render once and exit).
+`--signals`, `--period`, `--count`, `--prod-shift-min`, `--import-price-min`,
+`--import-price-max`, `--export-price-min`, `--export-price-max`), plus
+`--interval` (omit to render once and exit).
 
 ### Time window
 
@@ -337,6 +342,35 @@ metering every Wh of production reduces In 1:1 whether it was used
 on-site in the same instant or briefly exported and re-imported
 elsewhere, so a "fraction self-consumed" number doesn't correspond to
 anything actually billed - see `aggregates.py`.
+
+### Money balance
+
+`--import-price-min`/`--import-price-max`/`--export-price-min`/
+`--export-price-max` (`import_price_min=` etc. as query params; power and
+trends charts only) - per-kWh prices, in whatever currency you're
+thinking in. Given all four, a `Balance` line is added to the title:
+`exported_wh/1000 * export_price - imported_wh/1000 * import_price`,
+worst case (max import price, min export price) to best case (min
+import price, max export price). A flat single price for a direction is
+just the same value in both its min and max box - the two cases then
+agree for that side, and if both directions are flat the whole line
+collapses to a single figure instead of a range.
+
+This deliberately brackets the real figure rather than guessing at it:
+we can't tell from meter data alone which price tier (e.g. an
+energy-community favorable rate that only applies when local demand
+absorbs your surplus) applied to any given kWh - see
+[Chart types and signals](#chart-types-and-signals) above for why
+`imported_wh`/`exported_wh` are already the correctly per-settlement-
+bucket-netted figures this gets applied to, not a plain gross total.
+Trends charts sum `imported_wh`/`exported_wh` across every bucket in the
+window (regardless of which bars are toggled for display) before
+computing the balance - correct as long as the price itself is flat
+across that window; time-varying pricing (e.g. a night tariff) would need
+applying per-bucket instead, which isn't implemented.
+
+In the web UI, all four price inputs are remembered per-browser via
+`localStorage`, same as Prod shift.
 
 **`phases`**: **Phase {1,2,3} Import/Export** (color = direction, orange/
 blue, matching the power chart; linestyle = phase) - raw per-phase grid

@@ -104,6 +104,14 @@ _INDEX_HTML = f"""<!doctype html>
     Prod shift (min, experimental):
     <input type="number" id="prod-shift" step="0.1" value="{DEFAULT_PROD_SHIFT_MIN}" style="width:5em">
   </label>
+  <label id="price-label" title="Per-kWh prices - min/max bracket a worst/best-case Balance when the actual price tier (e.g. an energy-community favorable rate) can't be determined from meter data alone. A flat single price is just the same value in both boxes. Remembered per-browser via localStorage.">
+    Import price (min/max):
+    <input type="number" id="import-price-min" step="0.01" placeholder="min" style="width:4.5em">
+    <input type="number" id="import-price-max" step="0.01" placeholder="max" style="width:4.5em">
+    Export price (min/max):
+    <input type="number" id="export-price-min" step="0.01" placeholder="min" style="width:4.5em">
+    <input type="number" id="export-price-max" step="0.01" placeholder="max" style="width:4.5em">
+  </label>
 </div>
 <div id="chart-wrap"><img id="chart-img"></div>
 <script>
@@ -117,15 +125,30 @@ _INDEX_HTML = f"""<!doctype html>
   var hoursInput = document.getElementById('hours');
   var prodShiftLabel = document.getElementById('prod-shift-label');
   var prodShiftInput = document.getElementById('prod-shift');
+  var priceLabel = document.getElementById('price-label');
+  var priceInputs = {{
+    import_price_min: document.getElementById('import-price-min'),
+    import_price_max: document.getElementById('import-price-max'),
+    export_price_min: document.getElementById('export-price-min'),
+    export_price_max: document.getElementById('export-price-max')
+  }};
   var periodLabel = document.getElementById('period-label');
   var period = document.getElementById('period');
 
-  // Remembered per-browser: once a user dials in a shift value, it should
-  // stick across reloads instead of reverting to the server's default.
+  // Remembered per-browser: once a user dials in a shift/price value, it
+  // should stick across reloads instead of reverting to the server's
+  // default (shift) or blank (price).
   var savedProdShift = localStorage.getItem('prodShiftMin');
   if (savedProdShift !== null) prodShiftInput.value = savedProdShift;
   prodShiftInput.addEventListener('change', function () {{
     localStorage.setItem('prodShiftMin', prodShiftInput.value);
+  }});
+
+  Object.keys(priceInputs).forEach(function (key) {{
+    var el = priceInputs[key];
+    var saved = localStorage.getItem(key);
+    if (saved !== null) el.value = saved;
+    el.addEventListener('change', function () {{ localStorage.setItem(key, el.value); }});
   }});
 
   function checkedSignals(container) {{
@@ -141,6 +164,7 @@ _INDEX_HTML = f"""<!doctype html>
     trendSignals.style.display = isTrends ? '' : 'none';
     hoursLabel.style.display = isTrends ? 'none' : '';
     prodShiftLabel.style.display = (isPhases || isTrends) ? 'none' : '';
+    priceLabel.style.display = isPhases ? 'none' : '';
     periodLabel.style.display = isTrends ? '' : 'none';
 
     var signalContainer = isTrends ? trendSignals : (isPhases ? phaseSignals : powerSignals);
@@ -161,6 +185,14 @@ _INDEX_HTML = f"""<!doctype html>
         params.set('prod_shift_min', prodShiftInput.value);
       }}
     }}
+    if (!isPhases) {{
+      // Balance only shows once all four are filled in (see
+      // chart.py _money_balance) - sending a partial set is harmless,
+      // the backend just won't have enough to compute one.
+      Object.keys(priceInputs).forEach(function (key) {{
+        if (priceInputs[key].value !== '') params.set(key, priceInputs[key].value);
+      }});
+    }}
     params.set('t', Date.now());  // cache-bust: always refetch, never a stale cached image
     img.src = '/chart.png?' + params.toString();
   }}
@@ -168,6 +200,9 @@ _INDEX_HTML = f"""<!doctype html>
   chartType.addEventListener('change', updateSrc);
   hoursInput.addEventListener('change', updateSrc);
   prodShiftInput.addEventListener('change', updateSrc);
+  Object.keys(priceInputs).forEach(function (key) {{
+    priceInputs[key].addEventListener('change', updateSrc);
+  }});
   period.addEventListener('change', updateSrc);
   Array.prototype.forEach.call(document.querySelectorAll('input[data-signal]'), function (el) {{
     el.addEventListener('change', updateSrc);
@@ -215,6 +250,13 @@ def _query_float(query: dict, key: str, default: float, lo: float, hi: float) ->
     except (KeyError, IndexError, ValueError):
         return default
     return _clamp(value, lo, hi)
+
+
+def _query_optional_float(query: dict, key: str) -> float | None:
+    try:
+        return float(query[key][0])
+    except (KeyError, IndexError, ValueError):
+        return None
 
 
 def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
@@ -281,6 +323,10 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 period=period,
                 count=count,
                 prod_shift_min=prod_shift_min,
+                import_price_min=_query_optional_float(query, "import_price_min"),
+                import_price_max=_query_optional_float(query, "import_price_max"),
+                export_price_min=_query_optional_float(query, "export_price_min"),
+                export_price_max=_query_optional_float(query, "export_price_max"),
             )
 
             self.send_response(200)
@@ -304,7 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stroummeeschter-web",
         description="Serve charts on demand over HTTP (GET /chart.png?chart=power|phases|trends&hours=&date=&"
-        "day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=).",
+        "day_start_hour=&width=&height=&signals=&period=&count=&prod_shift_min=&import_price_min=&"
+        "import_price_max=&export_price_min=&export_price_max=).",
     )
     parser.add_argument(
         "--db",

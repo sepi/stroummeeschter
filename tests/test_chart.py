@@ -11,6 +11,8 @@ from stroummeeschter.chart import (
     DEFAULT_POWER_SIGNALS,
     DEFAULT_TREND_SIGNALS,
     _fetch_series,
+    _fmt_balance,
+    _money_balance,
     _resample,
     _shift_by_minutes,
     _time_grid,
@@ -150,6 +152,51 @@ def test_shift_by_minutes_negative_moves_curve_right_toward_the_future():
     assert math.isnan(result.iloc[0])
     assert result.iloc[1] == 10.0
     assert result.iloc[2] == 20.0
+
+
+def test_money_balance_worst_pays_max_import_earns_min_export():
+    # 2 kWh imported, 3 kWh exported. Worst case: pay the max import price,
+    # earn only the min export price.
+    worst, best = _money_balance(2000.0, 3000.0, import_price_min=0.20, import_price_max=0.30, export_price_min=0.05, export_price_max=0.15)
+    assert worst == pytest.approx(3 * 0.05 - 2 * 0.30)  # -0.45
+    assert best == pytest.approx(3 * 0.15 - 2 * 0.20)  # 0.05
+
+
+def test_money_balance_flat_single_price_collapses_worst_and_best():
+    worst, best = _money_balance(2000.0, 3000.0, import_price_min=0.25, import_price_max=0.25, export_price_min=0.10, export_price_max=0.10)
+    assert worst == best == pytest.approx(3 * 0.10 - 2 * 0.25)
+
+
+def test_money_balance_is_none_when_any_input_missing():
+    assert _money_balance(2000.0, 3000.0, 0.2, 0.3, 0.1, None) is None
+    assert _money_balance(None, 3000.0, 0.2, 0.3, 0.1, 0.15) is None
+
+
+def test_fmt_balance_none_is_none():
+    assert _fmt_balance(None) is None
+
+
+def test_fmt_balance_shows_single_figure_when_worst_equals_best():
+    assert _fmt_balance((1.5, 1.5)) == "Balance +1.50"
+
+
+def test_fmt_balance_shows_range_when_worst_differs_from_best():
+    assert _fmt_balance((-0.45, 0.05)) == "Balance -0.45 (worst) to +0.05 (best)"
+
+
+def test_render_power_chart_with_prices_includes_balance_in_title(conn):
+    png = render_power_chart(
+        conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00",
+        import_price_min=0.2, import_price_max=0.3, export_price_min=0.05, export_price_max=0.15,
+    )
+    assert png.startswith(PNG_MAGIC)
+
+
+def test_render_power_chart_without_prices_has_no_balance_line(conn):
+    with patch("matplotlib.axes.Axes.set_title") as mocked_title:
+        render_power_chart(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
+    title_text = mocked_title.call_args[0][0]
+    assert "Balance" not in title_text
 
 
 def test_fetch_series_returns_a_series_indexed_by_time(conn):
@@ -365,6 +412,23 @@ def test_render_trends_chart_returns_valid_png(trends_conn):
     buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
     png = render_trends_chart(trends_conn, buckets)
     assert png.startswith(PNG_MAGIC)
+
+
+def test_render_trends_chart_with_prices_includes_balance_in_title(trends_conn):
+    buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    with patch("matplotlib.axes.Axes.set_title") as mocked_title:
+        render_trends_chart(
+            trends_conn, buckets,
+            import_price_min=0.2, import_price_max=0.3, export_price_min=0.05, export_price_max=0.15,
+        )
+    assert "Balance" in mocked_title.call_args[0][0]
+
+
+def test_render_trends_chart_without_prices_has_no_balance_line(trends_conn):
+    buckets = trend_buckets("day", 3, now=datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc))
+    with patch("matplotlib.axes.Axes.set_title") as mocked_title:
+        render_trends_chart(trends_conn, buckets)
+    assert "Balance" not in mocked_title.call_args[0][0]
 
 
 def test_render_trends_chart_signals_subset_returns_valid_png(trends_conn):

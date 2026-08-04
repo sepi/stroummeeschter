@@ -72,6 +72,23 @@ def test_chart_png_clamps_out_of_range_prod_shift_min(server):
     assert resp.content.startswith(PNG_MAGIC)
 
 
+def test_chart_png_supports_prices(server):
+    resp = requests.get(
+        server + "/chart.png",
+        params={"import_price_min": "0.2", "import_price_max": "0.3", "export_price_min": "0.05", "export_price_max": "0.15"},
+        timeout=5,
+    )
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
+def test_chart_png_partial_prices_are_harmless(server):
+    # Only some of the four given - no Balance line, but must not error.
+    resp = requests.get(server + "/chart.png", params={"import_price_min": "0.2"}, timeout=5)
+    assert resp.status_code == 200
+    assert resp.content.startswith(PNG_MAGIC)
+
+
 def test_chart_png_rejects_unknown_chart_type(server):
     resp = requests.get(server + "/chart.png", params={"chart": "nonsense"}, timeout=5)
     assert resp.status_code == 400

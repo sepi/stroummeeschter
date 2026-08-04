@@ -106,6 +106,44 @@ def _fmt_pct(fraction: float | None) -> str:
     return f"{fraction * 100:.0f}%" if fraction is not None else "n/a"
 
 
+def _money_balance(
+    imported_wh: float | None,
+    exported_wh: float | None,
+    import_price_min: float | None,
+    import_price_max: float | None,
+    export_price_min: float | None,
+    export_price_max: float | None,
+) -> tuple[float, float] | None:
+    """Conservative worst/best-case balance (whatever currency unit the
+    prices are given in) from already-netted imported_wh/exported_wh -
+    None if any input is missing.
+
+    We can't tell from our own data which price tier (e.g. an
+    energy-community favorable rate) applied to any given kWh, so this
+    brackets the real figure instead of guessing at it: worst case pays
+    the max import price and earns the min export price; best case pays
+    the min import price and earns the max export price. A single flat
+    price for a direction is just min == max for that direction - the
+    two cases then agree for that side."""
+    values = (imported_wh, exported_wh, import_price_min, import_price_max, export_price_min, export_price_max)
+    if None in values:
+        return None
+    imported_kwh = imported_wh / 1000
+    exported_kwh = exported_wh / 1000
+    worst = exported_kwh * export_price_min - imported_kwh * import_price_max
+    best = exported_kwh * export_price_max - imported_kwh * import_price_min
+    return worst, best
+
+
+def _fmt_balance(balance: tuple[float, float] | None) -> str | None:
+    if balance is None:
+        return None
+    worst, best = balance
+    if worst == best:
+        return f"Balance {worst:+.2f}"
+    return f"Balance {worst:+.2f} (worst) to {best:+.2f} (best)"
+
+
 def _time_grid(since: str, until: str) -> pd.DatetimeIndex:
     return pd.date_range(start=pd.Timestamp(since), end=pd.Timestamp(until), freq=RESAMPLE_FREQ, inclusive="left")
 
@@ -178,6 +216,10 @@ def render_power_chart(
     totals_until: str | None = None,
     signals: set[str] | None = None,
     prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
+    import_price_min: float | None = None,
+    import_price_max: float | None = None,
+    export_price_min: float | None = None,
+    export_price_max: float | None = None,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
@@ -202,7 +244,13 @@ def render_power_chart(
     past - i.e. a currently-recorded reading is displayed as if it happened
     this long ago, which is what you'd want if Production is lagging behind
     the near-instant grid readings. Defaults to DEFAULT_PROD_SHIFT_MIN, not
-    0 - pass 0 explicitly to see the raw, unshifted data."""
+    0 - pass 0 explicitly to see the raw, unshifted data.
+
+    `import_price_min/max`/`export_price_min/max` (all optional, same
+    currency unit and per-kWh basis you'd naturally quote a tariff in): if
+    all four are given, a worst/best-case Balance line is added to the
+    title - see _money_balance. A flat single price for a direction is
+    just min == max for that direction."""
     totals_since = totals_since or since
     totals_until = totals_until or until
     show = DEFAULT_POWER_SIGNALS if signals is None else signals
@@ -269,6 +317,14 @@ def render_power_chart(
     ]
     if totals["pv_production_wh"] is not None:
         title_lines.append(f"PV production {_fmt_kwh(totals['pv_production_wh'])}")
+    balance_line = _fmt_balance(
+        _money_balance(
+            totals["imported_wh"], totals["exported_wh"],
+            import_price_min, import_price_max, export_price_min, export_price_max,
+        )
+    )
+    if balance_line:
+        title_lines.append(balance_line)
     if prod_shift_min:
         # Self-documenting: a shifted chart must never look indistinguishable
         # from an unshifted one - see prod_shift_min's docstring note.
@@ -286,6 +342,10 @@ def render_trends_chart(
     conn: sqlite3.Connection,
     buckets: list[tuple[str, str, str]],
     signals: set[str] | None = None,
+    import_price_min: float | None = None,
+    import_price_max: float | None = None,
+    export_price_min: float | None = None,
+    export_price_max: float | None = None,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
@@ -302,11 +362,23 @@ def render_trends_chart(
     billed). consumed_wh/net_import_wh are read straight from
     aggregates.energy_totals(), which already derives them from the
     confirmed net-metering identity.
+
+    `import_price_min/max`/`export_price_min/max` (optional, see
+    render_power_chart): if all four are given, a worst/best-case Balance
+    for the *whole* window (summed imported/exported across every bucket,
+    regardless of which bars are toggled for display) is added to the
+    title - a flat price times a per-bucket-netted total isn't the same
+    as pricing each bucket separately and summing, but since the price
+    itself is assumed constant across the window here, it is exactly
+    equivalent (only time-varying pricing would need to be applied
+    per-bucket).
     """
     show = DEFAULT_TREND_SIGNALS if signals is None else signals
 
     labels = []
     values = {name: [] for name in TREND_SIGNALS}
+    total_imported_wh = 0.0
+    total_exported_wh = 0.0
     for label, since, until in buckets:
         totals = energy_totals(conn, since, until)
         labels.append(label)
@@ -316,6 +388,8 @@ def render_trends_chart(
         values["produced"].append(_kwh_or_nan(totals["pv_production_wh"]))
         values["consumed"].append(_kwh_or_nan(totals["consumed_wh"]))
         values["surplus"].append(_kwh_or_nan(totals["net_export_wh"]))
+        total_imported_wh += totals["imported_wh"] or 0.0
+        total_exported_wh += totals["exported_wh"] or 0.0
 
     fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     ax.set_axisbelow(True)
@@ -338,7 +412,14 @@ def render_trends_chart(
         f"{_trend_label(name)} {sum(v for v in values[name] if v == v):.1f} kWh"  # v == v filters NaN
         for name in shown
     )
-    ax.set_title(totals_line, fontsize=8)
+    balance_line = _fmt_balance(
+        _money_balance(
+            total_imported_wh, total_exported_wh,
+            import_price_min, import_price_max, export_price_min, export_price_max,
+        )
+    )
+    title = f"{totals_line}\n{balance_line}" if balance_line else totals_line
+    ax.set_title(title, fontsize=8)
 
     fig.tight_layout()
     buf = io.BytesIO()

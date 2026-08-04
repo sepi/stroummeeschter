@@ -68,6 +68,10 @@ def render_png(
     period: str = "day",
     count: int | None = None,
     prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
+    import_price_min: float | None = None,
+    import_price_max: float | None = None,
+    export_price_min: float | None = None,
+    export_price_max: float | None = None,
 ) -> bytes:
     """Resolve the time window and render one chart to PNG bytes. Shared by
     the file-writing CLI below and webapp.py's on-demand HTTP endpoint, so
@@ -82,8 +86,16 @@ def render_png(
     the day-window resolution below entirely.
 
     `prod_shift_min` only applies to --chart power - see
-    render_power_chart's docstring."""
+    render_power_chart's docstring. `import_price_min/max`/
+    `export_price_min/max` apply to --chart power and --chart trends (not
+    phases, which has no money-relevant totals) - see _money_balance."""
     signal_set = {s.strip() for s in signals.split(",") if s.strip()} if signals else None
+    price_kwargs = dict(
+        import_price_min=import_price_min,
+        import_price_max=import_price_max,
+        export_price_min=export_price_min,
+        export_price_max=export_price_max,
+    )
 
     if chart == "trends":
         buckets = trend_buckets(period, count or TREND_DEFAULT_COUNT[period], day_start_hour=day_start_hour)
@@ -91,7 +103,7 @@ def render_png(
         db.init_db(conn)
         try:
             return render_trends_chart(
-                conn, buckets, signals=signal_set, width_px=width_px, height_px=height_px
+                conn, buckets, signals=signal_set, width_px=width_px, height_px=height_px, **price_kwargs
             )
         finally:
             conn.close()
@@ -117,7 +129,7 @@ def render_png(
     else:
         since, until = totals_since, totals_until
 
-    extra_kwargs = {"prod_shift_min": prod_shift_min} if chart == "power" else {}
+    extra_kwargs = {"prod_shift_min": prod_shift_min, **price_kwargs} if chart == "power" else {}
 
     conn = db.connect(db_path)
     db.init_db(conn)
@@ -150,6 +162,10 @@ def write_chart(
     period: str = "day",
     count: int | None = None,
     prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
+    import_price_min: float | None = None,
+    import_price_max: float | None = None,
+    export_price_min: float | None = None,
+    export_price_max: float | None = None,
 ) -> None:
     png = render_png(
         db_path,
@@ -163,6 +179,10 @@ def write_chart(
         period=period,
         count=count,
         prod_shift_min=prod_shift_min,
+        import_price_min=import_price_min,
+        import_price_max=import_price_max,
+        export_price_min=export_price_min,
+        export_price_max=export_price_max,
     )
 
     # Write via a temp file + atomic rename so a concurrent reader (a static
@@ -243,6 +263,18 @@ def build_parser() -> argparse.ArgumentParser:
         "this by hand found no clean single value that corrects it, just one judged reasonable. "
         f"Default {DEFAULT_PROD_SHIFT_MIN} min - pass 0 to see the raw, unshifted data.",
     )
+    parser.add_argument(
+        "--import-price-min",
+        type=float,
+        default=None,
+        help="Price per kWh imported (worst case: paired with --export-price-min for the worst-case "
+        "Balance). --chart power/trends only. A flat single import price is just min == max. "
+        "All four of --import-price-{min,max}/--export-price-{min,max} must be given together to "
+        "show a Balance line.",
+    )
+    parser.add_argument("--import-price-max", type=float, default=None, help="Price per kWh imported (best case).")
+    parser.add_argument("--export-price-min", type=float, default=None, help="Price per kWh exported (worst case).")
+    parser.add_argument("--export-price-max", type=float, default=None, help="Price per kWh exported (best case).")
     parser.add_argument("--width", type=int, default=1600, help="Image width in pixels (default: %(default)s)")
     parser.add_argument("--height", type=int, default=400, help="Image height in pixels (default: %(default)s)")
     parser.add_argument(
@@ -275,6 +307,10 @@ def main(argv: list[str] | None = None) -> None:
         period=args.period,
         count=args.count,
         prod_shift_min=args.prod_shift_min,
+        import_price_min=args.import_price_min,
+        import_price_max=args.import_price_max,
+        export_price_min=args.export_price_min,
+        export_price_max=args.export_price_max,
     )
 
     if args.interval is None:

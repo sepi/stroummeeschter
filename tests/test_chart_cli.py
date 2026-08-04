@@ -123,6 +123,41 @@ def test_write_chart_supports_prod_shift_min(tmp_path):
         assert f.read(8) == PNG_MAGIC
 
 
+def test_write_chart_supports_prices_for_power(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    out_path = str(tmp_path / "power.png")
+    _seed(db_path)
+
+    write_chart(
+        db_path, out_path, hours=24, width_px=300, height_px=200,
+        import_price_min=0.2, import_price_max=0.3, export_price_min=0.05, export_price_max=0.15,
+    )
+
+    with open(out_path, "rb") as f:
+        assert f.read(8) == PNG_MAGIC
+
+
+def test_write_chart_supports_prices_for_trends(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    out_path = str(tmp_path / "trends.png")
+    conn = db.connect(db_path)
+    db.init_db(conn)
+    for eid in ("sensor-energy_consumed_luxembourg", "sensor-energy_produced_luxembourg"):
+        db.upsert_entity(conn, eid, "2026-07-20T00:00:00+00:00", unit="Wh", category=0)
+        db.insert_reading(conn, eid, 0.0, "2026-07-24T04:00:00+00:00")
+        db.insert_reading(conn, eid, 1000.0, "2026-07-25T03:59:59+00:00")
+    conn.commit()
+    conn.close()
+
+    write_chart(
+        db_path, out_path, width_px=300, height_px=200, chart="trends", period="week", count=2,
+        import_price_min=0.2, import_price_max=0.3, export_price_min=0.05, export_price_max=0.15,
+    )
+
+    with open(out_path, "rb") as f:
+        assert f.read(8) == PNG_MAGIC
+
+
 def test_write_chart_ignores_prod_shift_min_for_phases(tmp_path):
     # prod_shift_min only makes sense for --chart power; passing it for
     # other chart types must not error (render_png only threads it through
