@@ -22,18 +22,54 @@ def conn():
     connection.close()
 
 
-def test_totals_from_first_and_last_reading_in_window(conn):
-    db.insert_reading(conn, "sensor-energy_consumed_luxembourg", 10_000.0, "2026-07-25T08:00:00+00:00")
-    db.insert_reading(conn, "sensor-energy_consumed_luxembourg", 10_500.0, "2026-07-25T09:00:00+00:00")
-    db.insert_reading(conn, "sensor-energy_produced_luxembourg", 5_000.0, "2026-07-25T08:00:00+00:00")
-    db.insert_reading(conn, "sensor-energy_produced_luxembourg", 5_800.0, "2026-07-25T09:00:00+00:00")
+def test_totals_are_netted_per_15min_bucket_not_a_single_lump_diff(conn):
+    # Three 15-min buckets: [08:00,08:15) nets +100 (import), [08:15,08:30)
+    # nets -300 (export), [08:30,08:45) nets -500 (export). imported_wh
+    # (In+) only sums the positive buckets; exported_wh (En+) only the
+    # negative ones - NOT a plain first/last diff over the whole window.
+    for ts, imp, exp in [
+        ("2026-07-25T08:00:00+00:00", 10_000.0, 5_000.0),
+        ("2026-07-25T08:15:00+00:00", 10_100.0, 5_000.0),
+        ("2026-07-25T08:30:00+00:00", 10_100.0, 5_300.0),
+        ("2026-07-25T08:45:00+00:00", 10_200.0, 5_900.0),
+    ]:
+        db.insert_reading(conn, "sensor-energy_consumed_luxembourg", imp, ts)
+        db.insert_reading(conn, "sensor-energy_produced_luxembourg", exp, ts)
     conn.commit()
 
     totals = energy_totals(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
-    assert totals["imported_wh"] == 500.0
-    assert totals["exported_wh"] == 800.0
-    assert totals["net_import_wh"] == -300.0
-    assert totals["net_export_wh"] == 300.0
+    assert totals["imported_wh"] == 100.0  # only the [08:00,08:15) bucket
+    assert totals["exported_wh"] == 800.0  # the other two buckets: 300 + 500
+    # net_import_wh still telescopes correctly regardless of bucket width -
+    # it's just imported_wh - exported_wh (100 - 900 gross... no: it's the
+    # lump diff, matching total import 200 - total export 900).
+    assert totals["net_import_wh"] == -700.0
+    assert totals["net_export_wh"] == 700.0
+
+
+def test_same_bucket_offsetting_activity_nets_away(conn):
+    # [08:00,08:15): 100 Wh imported AND 100 Wh exported in the same
+    # bucket - these must cancel (net 0), contributing nothing to either
+    # imported_wh or exported_wh, unlike a plain gross total which would
+    # count both. [08:15,08:30): 150 Wh imported with no offsetting
+    # export - this one counts in full.
+    for ts, imp, exp in [
+        ("2026-07-25T08:00:00+00:00", 10_000.0, 5_000.0),
+        ("2026-07-25T08:15:00+00:00", 10_100.0, 5_100.0),
+        ("2026-07-25T08:30:00+00:00", 10_250.0, 5_100.0),
+    ]:
+        db.insert_reading(conn, "sensor-energy_consumed_luxembourg", imp, ts)
+        db.insert_reading(conn, "sensor-energy_produced_luxembourg", exp, ts)
+    conn.commit()
+
+    totals = energy_totals(conn, "2026-07-25T00:00:00+00:00", "2026-07-26T00:00:00+00:00")
+    # Gross totals over the window would be 250 Wh imported / 100 Wh
+    # exported - the correct netted figures are smaller for imported_wh
+    # because 100 Wh of it was offset within its own bucket.
+    assert totals["imported_wh"] == 150.0
+    assert totals["exported_wh"] == 0.0
+    assert totals["net_import_wh"] == 150.0
+    assert totals["net_export_wh"] == -150.0
 
 
 def test_totals_are_none_when_no_data_in_window(conn):

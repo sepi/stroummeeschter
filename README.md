@@ -1,6 +1,6 @@
 # stroummeeschter
 
-Records home energy data into SQLite and serves charts/stats from it:
+Records home energy data into SQLite and serves charts from it:
 grid import/export from a SlimmeLezer (an ESPHome-based P1 smart-meter
 reader), and solar production from an Enphase Envoy. "Stroum" is
 Luxembourgish for electricity/current.
@@ -15,7 +15,7 @@ SQLite database:
 | `stroummeeschter-import-slimmelezer` | Streams grid import/export (and more) from the SlimmeLezer via Server-Sent Events |
 | `stroummeeschter-import-envoy` | Polls an Enphase Envoy for solar production |
 | `stroummeeschter-chart` | Renders a chart to a PNG file, once or on a fixed interval |
-| `stroummeeschter-web` | Serves charts and stats on demand over HTTP, plus an interactive browser page |
+| `stroummeeschter-web` | Serves charts on demand over HTTP, plus an interactive browser page |
 
 Only `stroummeeschter-import-slimmelezer` is required to get anything
 useful; the Envoy poller adds true solar production (Net import,
@@ -223,14 +223,12 @@ stroummeeschter-web --db stroummeeschter.db --port 8080
   every CLI option below available as a query param). Point rafthercal's
   `ImagePlugin` (`IMAGE_URL` config) at this for printing, or fetch it
   from a browser/AJAX call.
-- `GET /stats.json` - see [Stats](#stats) below.
 - `GET /` - an interactive page: chart-type selector, per-signal
   checkboxes (2x3 grid, swaps between power/phase/trend signals - gross
   import/export start unchecked, matching the CLI default), an hours
   override, a period selector (for `trends`), an experimental Prod shift
-  input (power chart only - see below), a live stats table (toggleable,
-  at the bottom), auto-resizes to the browser window, and refreshes every
-  30s (and on resize/control change).
+  input (power chart only - see below), auto-resizes to the browser
+  window, and refreshes every 30s (and on resize/control change).
 
 `--host` defaults to `0.0.0.0` (LAN-reachable, no auth) and `--port`
 defaults to `8080` (env `STROUMMEESCHTER_WEB_HOST` / `_WEB_PORT`) - this
@@ -263,7 +261,7 @@ stops 2 hours past "now" rather than riding out to the day's actual end
 (there's no data in the future anyway; this just keeps the legend's
 corner off of real data). `--date`/`date` renders a past day instead.
 `--hours`/`hours` overrides both with a rolling window ending now (e.g.
-a quick "last 3 hours" check) - the title/stats aggregates still always
+a quick "last 3 hours" check) - the title aggregates still always
 cover the full calendar day even then, since "today's total" matters
 regardless of how far you've zoomed in.
 
@@ -316,18 +314,23 @@ comparison.
 
 **`--prod-shift-min`/`prod_shift_min=` (power chart only, EXPERIMENTAL)** -
 shifts the Production line (and what feeds Consumption) by this many
-minutes; a float, default `0`. Positive shifts it left/toward the past -
-i.e. a currently-recorded reading is displayed as if it happened this long
-ago, which is the direction you'd want if Production is lagging behind
-the near-instant grid readings (see above). This is a diagnostic knob for
-poking at the data, **not a real fix**: manually grid-searching it against
-5.5 days of real data found no clean single value that corrects the
-artifact - the metric kept improving all the way to the edge of a 15-minute
-search without leveling off, which points to variable smoothing/
-under-response during transients rather than a fixed delay a constant
-shift could correct. A shifted chart always says so in its title
-(`[experimental: Production shifted +N min]`) so it's never mistaken for
-an unshifted one.
+minutes; a float, **default `13.0`** (`chart.py`'s `DEFAULT_PROD_SHIFT_MIN`
+- pass `0` explicitly to see the raw, unshifted data). Positive shifts it
+left/toward the past - i.e. a currently-recorded reading is displayed as
+if it happened this long ago, which is the direction you'd want if
+Production is lagging behind the near-instant grid readings (see above).
+This is a diagnostic knob for poking at the data, **not a verified fix**:
+manually grid-searching it against 5.5 days of real data found no clean
+single value that corrects the artifact - the metric kept improving all
+the way to the edge of a 15-minute search without leveling off, which
+points to variable smoothing/under-response during transients rather than
+a fixed delay a constant shift could correct. 13 minutes is just judged
+"not bad" for this install, not a derived/verified optimum. A shifted
+chart always says so in its title (`[experimental: Production shifted +N
+min]`) so it's never mistaken for an unshifted one. In the web UI, the
+Prod shift input is remembered per-browser via `localStorage`, so once you
+override it there, that value sticks across reloads instead of reverting
+to the server default.
 
 There's deliberately no self-consumption ratio: under confirmed net
 metering every Wh of production reduces In 1:1 whether it was used
@@ -403,36 +406,6 @@ genuinely distinct readings for the same entity can land in the same
 second (e.g. an SSE reconnect's full-snapshot replay overlapping a real
 delta) - `pandas.reindex()` requires a unique index, so `_fetch_series`
 keeps the later of any same-second duplicate.
-
-## Stats
-
-`GET /stats.json` on `stroummeeschter-web` - summary statistics across
-five horizons (`last_hour`, `last_day`, `last_week`, `last_month` [30-day
-approximation, calendar months vary], `total` [since the earliest actual
-reading]), computed symmetrically across Import/Export/Production/
-Consumption (`stats.py`):
-
-- **min/avg/max (W)** for Import, Export, Production - these are directly
-  stored signals, so exact min/avg/max is one cheap indexed SQL aggregate
-  each, no resampling needed.
-- **avg (W)** for Consumption only (not min/max) - Consumption isn't
-  stored directly; true min/max would mean redoing the full resampled/
-  derived series `chart.py` uses, which gets expensive as `total` grows
-  over months of history. The average is cheap and exact: avg power =
-  energy / time, using the same energy-balance identity as the chart's
-  Consumption line, just as a plain total rather than a resampled series.
-- **Imported/Exported/Produced/Consumed/Net import/Net export (kWh)** for
-  every horizon - reusing `aggregates.energy_totals()` (cheap for any
-  window), which derives Consumed from the confirmed net-metering
-  identity (`consumed = net_import + produced`) rather than duplicating
-  that math per call site.
-- **Net-exporting share** - also from `energy_totals()`. No
-  self-consumption ratio - see [Chart types and signals](#chart-types-and-signals).
-
-Shown in `stroummeeschter-web`'s browser page as a toggleable table at
-the bottom.
-
-Not yet built: wiring this into a rafthercal text report (planned).
 
 ## Development
 

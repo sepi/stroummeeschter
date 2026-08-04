@@ -91,6 +91,12 @@ MAX_GAP = pd.Timedelta(minutes=5)
 # observed max without falling back to full outage-level tolerance.
 DERIVED_MAX_GAP = pd.Timedelta(seconds=60)
 
+# Grid-searched by hand against 5.5 days of real data (see render_power_chart's
+# prod_shift_min docstring) - not a verified correction, just judged "not bad"
+# for this specific install's lag. Still experimental: no clean single value
+# was found that actually corrects the underlying artifact.
+DEFAULT_PROD_SHIFT_MIN = 13.0
+
 
 def _fmt_kwh(wh: float | None) -> str:
     return f"{wh / 1000:.2f} kWh" if wh is not None else "n/a"
@@ -171,7 +177,7 @@ def render_power_chart(
     totals_since: str | None = None,
     totals_until: str | None = None,
     signals: set[str] | None = None,
-    prod_shift_min: float = 0.0,
+    prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
     width_px: int = 1600,
     height_px: int = 400,
     dpi: int = 100,
@@ -188,14 +194,15 @@ def render_power_chart(
     computed regardless - the title's aggregates never depend on what's
     toggled on for display.
 
-    `prod_shift_min` is an experimental diagnostic knob (not a real fix -
-    see the module docstring's note on why a fixed shift doesn't cleanly
-    correct the lag/under-response artifact, from manually grid-searching
-    it): shifts the Production line (and what feeds Consumption) by this
-    many minutes. Positive shifts it left/toward the past - i.e. a
-    currently-recorded reading is displayed as if it happened this long
-    ago, which is what you'd want if Production is lagging behind the
-    near-instant grid readings. 0 (default) applies no shift."""
+    `prod_shift_min` is an experimental diagnostic knob (not a verified fix
+    - grid-searching it by hand found no clean single value that actually
+    corrects the lag/under-response artifact, just one judged "not bad" -
+    see DEFAULT_PROD_SHIFT_MIN): shifts the Production line (and what feeds
+    Consumption) by this many minutes. Positive shifts it left/toward the
+    past - i.e. a currently-recorded reading is displayed as if it happened
+    this long ago, which is what you'd want if Production is lagging behind
+    the near-instant grid readings. Defaults to DEFAULT_PROD_SHIFT_MIN, not
+    0 - pass 0 explicitly to see the raw, unshifted data."""
     totals_since = totals_since or since
     totals_until = totals_until or until
     show = DEFAULT_POWER_SIGNALS if signals is None else signals

@@ -13,7 +13,6 @@ query parameter for free - no separate "web" rendering path to keep in sync.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 from datetime import date as date_cls
@@ -21,9 +20,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from stroummeeschter import db
-from stroummeeschter.chart import DEFAULT_POWER_SIGNALS, DEFAULT_TREND_SIGNALS, PHASE_SIGNALS, POWER_SIGNALS, TREND_SIGNALS
+from stroummeeschter.chart import (
+    DEFAULT_POWER_SIGNALS,
+    DEFAULT_PROD_SHIFT_MIN,
+    DEFAULT_TREND_SIGNALS,
+    PHASE_SIGNALS,
+    POWER_SIGNALS,
+    TREND_SIGNALS,
+)
 from stroummeeschter.chart_cli import DEFAULT_DAY_START_HOUR, RENDERERS, render_png
-from stroummeeschter.stats import compute_stats
 from stroummeeschter.trends import DEFAULT_COUNT as TREND_DEFAULT_COUNT
 from stroummeeschter.trends import PERIODS as TREND_PERIODS
 
@@ -65,13 +70,6 @@ _INDEX_HTML = f"""<!doctype html>
   select, input[type=number] {{ background: #222; color: #eee; border: 1px solid #555; }}
   .signal-grid {{ display: grid; grid-template-rows: repeat(2, auto);
                   grid-auto-flow: column; gap: 2px 12px; }}
-  #stats-panel {{ position: fixed; bottom: 0; left: 0; right: 0; max-height: 40%;
-                  overflow: auto; background: rgba(0,0,0,0.8); font-size: 12px;
-                  padding: 8px; display: none; z-index: 9; }}
-  #stats-panel table {{ border-collapse: collapse; margin: 0 auto; }}
-  #stats-panel th, #stats-panel td {{ padding: 2px 8px; text-align: right; white-space: nowrap; }}
-  #stats-panel th {{ text-align: left; }}
-  #stats-panel td:first-child, #stats-panel th:first-child {{ text-align: left; }}
 </style></head>
 <body>
 <div id="controls">
@@ -100,14 +98,12 @@ _INDEX_HTML = f"""<!doctype html>
   {_signal_checkboxes(TREND_SIGNALS, checked=DEFAULT_TREND_SIGNALS)}
   </div>
   <label id="hours-label">Hours: <input type="number" id="hours" placeholder="full day" style="width:5em"></label>
-  <label id="prod-shift-label" title="Experimental diagnostic - shifts the Production line by this many minutes; positive = toward the past. Not a real fix, see chart.py.">
+  <label id="prod-shift-label" title="Experimental diagnostic - shifts the Production line by this many minutes; positive = toward the past. Not a real fix, see chart.py. Remembered per-browser via localStorage.">
     Prod shift (min, experimental):
-    <input type="number" id="prod-shift" step="0.1" value="0" style="width:5em">
+    <input type="number" id="prod-shift" step="0.1" value="{DEFAULT_PROD_SHIFT_MIN}" style="width:5em">
   </label>
-  <label><input type="checkbox" id="show-stats"> Stats</label>
 </div>
 <div id="chart-wrap"><img id="chart-img"></div>
-<div id="stats-panel"></div>
 <script>
 (function () {{
   var img = document.getElementById('chart-img');
@@ -121,8 +117,14 @@ _INDEX_HTML = f"""<!doctype html>
   var prodShiftInput = document.getElementById('prod-shift');
   var periodLabel = document.getElementById('period-label');
   var period = document.getElementById('period');
-  var showStats = document.getElementById('show-stats');
-  var statsPanel = document.getElementById('stats-panel');
+
+  // Remembered per-browser: once a user dials in a shift value, it should
+  // stick across reloads instead of reverting to the server's default.
+  var savedProdShift = localStorage.getItem('prodShiftMin');
+  if (savedProdShift !== null) prodShiftInput.value = savedProdShift;
+  prodShiftInput.addEventListener('change', function () {{
+    localStorage.setItem('prodShiftMin', prodShiftInput.value);
+  }});
 
   function checkedSignals(container) {{
     return Array.prototype.slice.call(container.querySelectorAll('input[data-signal]:checked'))
@@ -150,61 +152,16 @@ _INDEX_HTML = f"""<!doctype html>
       params.set('period', period.value);
     }} else {{
       if (hoursInput.value) params.set('hours', hoursInput.value);
-      if (!isPhases && prodShiftInput.value && Number(prodShiftInput.value) !== 0) {{
+      // Always sent (even 0) once past this guard - an explicit 0 must
+      // disable the shift, not silently fall back to the server's own
+      // non-zero default.
+      if (!isPhases && prodShiftInput.value !== '') {{
         params.set('prod_shift_min', prodShiftInput.value);
       }}
     }}
     params.set('t', Date.now());  // cache-bust: always refetch, never a stale cached image
     img.src = '/chart.png?' + params.toString();
   }}
-
-  var HORIZON_LABELS = {{last_hour: 'Last hour', last_day: 'Last day', last_week: 'Last week',
-                         last_month: 'Last month', total: 'Total'}};
-
-  function fmtW(v) {{ return v === null || v === undefined ? '-' : (v / 1000).toFixed(2) + ' kW'; }}
-  function fmtMinAvgMax(stat) {{
-    if (!stat) return '-';
-    return fmtW(stat.min_w) + ' / ' + fmtW(stat.avg_w) + ' / ' + fmtW(stat.max_w);
-  }}
-  function fmtKwh(v) {{ return v === null || v === undefined ? '-' : (v / 1000).toFixed(2) + ' kWh'; }}
-  function fmtPct(v) {{ return v === null || v === undefined ? '-' : Math.round(v * 100) + '%'; }}
-
-  function renderStats(data) {{
-    // Same shape for every signal: power view (min/avg/max W) then energy
-    // view (total kWh) where applicable - Import/Export/Production/
-    // Consumption all get both, nothing cherry-picked.
-    var rows = ['<tr><th>Horizon</th>' +
-                '<th>Import (min/avg/max)</th><th>Imported</th>' +
-                '<th>Export (min/avg/max)</th><th>Exported</th>' +
-                '<th>Net import</th>' +
-                '<th>Production (min/avg/max)</th><th>Produced</th>' +
-                '<th>Consumption (avg)</th><th>Consumed</th>' +
-                '<th>Net export</th><th>Net-exporting</th></tr>'];
-    Object.keys(HORIZON_LABELS).forEach(function (key) {{
-      var h = data.horizons[key];
-      if (!h) return;
-      rows.push('<tr><td>' + HORIZON_LABELS[key] + '</td><td>' +
-        fmtMinAvgMax(h.import_w) + '</td><td>' + fmtKwh(h.imported_wh) + '</td><td>' +
-        fmtMinAvgMax(h.export_w) + '</td><td>' + fmtKwh(h.exported_wh) + '</td><td>' +
-        fmtKwh(h.net_import_wh) + '</td><td>' +
-        fmtMinAvgMax(h.production_w) + '</td><td>' + fmtKwh(h.produced_wh) + '</td><td>' +
-        fmtW(h.avg_consumption_w) + '</td><td>' + fmtKwh(h.consumed_wh) + '</td><td>' +
-        fmtKwh(h.net_export_wh) + '</td><td>' +
-        fmtPct(h.net_exporting_share) + '</td></tr>');
-    }});
-    statsPanel.innerHTML = '<table>' + rows.join('') + '</table>';
-  }}
-
-  function updateStats() {{
-    if (!showStats.checked) return;
-    fetch('/stats.json').then(function (r) {{ return r.json(); }}).then(renderStats)
-      .catch(function (err) {{ statsPanel.textContent = 'Failed to load stats: ' + err; }});
-  }}
-
-  showStats.addEventListener('change', function () {{
-    statsPanel.style.display = showStats.checked ? 'block' : 'none';
-    updateStats();
-  }});
 
   chartType.addEventListener('change', updateSrc);
   hoursInput.addEventListener('change', updateSrc);
@@ -221,7 +178,7 @@ _INDEX_HTML = f"""<!doctype html>
   }});
 
   updateSrc();
-  setInterval(function () {{ updateSrc(); updateStats(); }}, {REFRESH_MS});
+  setInterval(updateSrc, {REFRESH_MS});
 }})();
 </script>
 </body></html>""".encode("utf-8")
@@ -267,8 +224,6 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     self._serve_index()
                 elif parsed.path == "/chart.png":
                     self._serve_chart(parse_qs(parsed.query))
-                elif parsed.path == "/stats.json":
-                    self._serve_stats()
                 else:
                     self.send_error(404)
             except Exception:
@@ -281,22 +236,6 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(_INDEX_HTML)))
             self.end_headers()
             self.wfile.write(_INDEX_HTML)
-
-        def _serve_stats(self) -> None:
-            conn = db.connect(db_path)
-            try:
-                db.init_db(conn)
-                stats = compute_stats(conn)
-            finally:
-                conn.close()
-
-            body = json.dumps(stats).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
 
         def _serve_chart(self, query: dict) -> None:
             chart = (query.get("chart") or ["power"])[0]
@@ -324,7 +263,9 @@ def make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 self.send_error(400, f"unknown period '{period}', expected one of {TREND_PERIODS}")
                 return
             count = _query_int(query, "count", TREND_DEFAULT_COUNT[period], 1, 366)
-            prod_shift_min = _query_float(query, "prod_shift_min", 0.0, -MAX_PROD_SHIFT_MIN, MAX_PROD_SHIFT_MIN)
+            prod_shift_min = _query_float(
+                query, "prod_shift_min", DEFAULT_PROD_SHIFT_MIN, -MAX_PROD_SHIFT_MIN, MAX_PROD_SHIFT_MIN
+            )
 
             png = render_png(
                 db_path,

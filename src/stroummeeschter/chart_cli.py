@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from stroummeeschter import db
 from stroummeeschter.chart import (
+    DEFAULT_PROD_SHIFT_MIN,
     LOCAL_TZ,
     PHASE_SIGNALS,
     POWER_SIGNALS,
@@ -66,7 +67,7 @@ def render_png(
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
-    prod_shift_min: float = 0.0,
+    prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
 ) -> bytes:
     """Resolve the time window and render one chart to PNG bytes. Shared by
     the file-writing CLI below and webapp.py's on-demand HTTP endpoint, so
@@ -148,7 +149,7 @@ def write_chart(
     signals: str | None = None,
     period: str = "day",
     count: int | None = None,
-    prod_shift_min: float = 0.0,
+    prod_shift_min: float = DEFAULT_PROD_SHIFT_MIN,
 ) -> None:
     png = render_png(
         db_path,
@@ -234,13 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prod-shift-min",
         type=float,
-        default=0.0,
+        default=DEFAULT_PROD_SHIFT_MIN,
         help="EXPERIMENTAL diagnostic knob, --chart power only: shift the Production line by this "
         "many minutes (float; positive shifts it left/toward the past - i.e. a currently-recorded "
-        "reading is displayed as if it happened this long ago). Not a real fix for the "
+        "reading is displayed as if it happened this long ago). Not a verified fix for the "
         "Production-lags-the-grid artifact (see chart.py render_power_chart docstring) - grid-searching "
-        "this by hand found no clean single value that corrects it, just for poking at the data. "
-        "Default 0 (no shift).",
+        "this by hand found no clean single value that corrects it, just one judged reasonable. "
+        f"Default {DEFAULT_PROD_SHIFT_MIN} min - pass 0 to see the raw, unshifted data.",
     )
     parser.add_argument("--width", type=int, default=1600, help="Image width in pixels (default: %(default)s)")
     parser.add_argument("--height", type=int, default=400, help="Image height in pixels (default: %(default)s)")

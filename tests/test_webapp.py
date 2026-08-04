@@ -1,5 +1,4 @@
 import threading
-from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -109,38 +108,6 @@ def test_chart_png_clamps_out_of_range_dimensions(server):
     resp = requests.get(server + "/chart.png", params={"width": "999999999", "height": "-5"}, timeout=5)
     assert resp.status_code == 200
     assert resp.content.startswith(PNG_MAGIC)
-
-
-def test_stats_json(tmp_path):
-    # /stats.json uses real "now" internally, so (unlike the chart tests)
-    # this needs data timestamped relative to actual current time, not the
-    # `server` fixture's fixed 2026 dates.
-    db_path = str(tmp_path / "stats.db")
-    conn = db.connect(db_path)
-    db.init_db(conn)
-    db.upsert_entity(conn, "sensor-power_consumed", "2026-07-25T00:00:00+00:00", unit="W", category=0)
-    # A few seconds in the past, not "now" exactly - the horizon query's
-    # upper bound is exclusive, and by the time the HTTP request actually
-    # reaches the server, real "now" has moved past whatever we compute here.
-    recent = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(timespec="seconds")
-    db.insert_reading(conn, "sensor-power_consumed", 500.0, recent)
-    conn.commit()
-    conn.close()
-
-    httpd = build_server(db_path, "127.0.0.1", 0)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    try:
-        resp = requests.get(f"http://127.0.0.1:{httpd.server_port}/stats.json", timeout=5)
-        assert resp.status_code == 200
-        assert resp.headers["Content-Type"] == "application/json"
-        data = resp.json()
-        assert "generated_at" in data
-        assert set(data["horizons"]) == {"last_hour", "last_day", "last_week", "last_month", "total"}
-        assert data["horizons"]["last_hour"]["import_w"]["max_w"] == 500.0
-    finally:
-        httpd.shutdown()
-        thread.join()
 
 
 def test_unknown_path_is_404(server):
