@@ -82,6 +82,8 @@ _INDEX_HTML = f"""<!doctype html>
   </label>
   <label id="period-label" style="display:none">Period:
     <select id="period">
+      <option value="quarter_hour">Quarter-hourly</option>
+      <option value="hour">Hourly</option>
       <option value="day">Daily</option>
       <option value="week">Weekly</option>
       <option value="month">Monthly</option>

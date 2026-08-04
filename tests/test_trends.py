@@ -5,6 +5,42 @@ import pytest
 from stroummeeschter.trends import trend_buckets
 
 
+def test_quarter_hour_bucket_aligns_to_15min_marks():
+    # 10:07 UTC = 12:07 CEST local (summer) -> floors to the 12:00-12:15 mark.
+    now = datetime(2026, 7, 25, 10, 7, 0, tzinfo=timezone.utc)
+    buckets = trend_buckets("quarter_hour", 1, now=now)
+    _, since, until = buckets[0]
+    assert since.startswith("2026-07-25T10:00:00")
+    assert until.startswith("2026-07-25T10:15:00")
+
+
+def test_hour_bucket_aligns_to_the_hour():
+    now = datetime(2026, 7, 25, 10, 37, 0, tzinfo=timezone.utc)
+    buckets = trend_buckets("hour", 1, now=now)
+    _, since, until = buckets[0]
+    assert since.startswith("2026-07-25T10:00:00")
+    assert until.startswith("2026-07-25T11:00:00")
+
+
+def test_hour_and_quarter_hour_ignore_day_start_hour():
+    # day_start_hour is meaningless once the bucket is smaller than a day -
+    # must not shift these away from the plain clock-aligned mark.
+    now = datetime(2026, 7, 25, 10, 30, 0, tzinfo=timezone.utc)
+    _, hour_since, _ = trend_buckets("hour", 1, day_start_hour=6, now=now)[0]
+    assert hour_since.startswith("2026-07-25T10:00:00")
+    _, qh_since, _ = trend_buckets("quarter_hour", 1, day_start_hour=6, now=now)[0]
+    assert qh_since.startswith("2026-07-25T10:30:00")
+
+
+def test_quarter_hour_and_hour_buckets_are_contiguous():
+    now = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
+    for period in ("quarter_hour", "hour"):
+        buckets = trend_buckets(period, 5, now=now)
+        assert len(buckets) == 5
+        for (_, _, until_a), (_, since_b, _) in zip(buckets, buckets[1:]):
+            assert until_a == since_b
+
+
 def test_day_bucket_contains_now():
     # 2026-07-25 10:00 UTC is noon local (Europe/Luxembourg, summer) - well
     # past the 6am day-start-hour boundary, so "today" runs 6am-6am local.

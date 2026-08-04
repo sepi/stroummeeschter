@@ -349,16 +349,25 @@ are the net residual per phase - useful for spotting a phase imbalance
 regardless of overall surplus).
 
 **`trends`**: a grouped bar chart of energy totals (kWh) per bucket -
-`--period {day,week,month,year}` (default `day`) sets the bucket size,
-`--count` how many buckets (defaults: 30 days, 12 weeks, 12 months, 5
-years). Buckets are calendar-aware (a "monthly" bucket spans that actual
-month, not a fixed 30 days) and end with whichever bucket "now" currently
-falls in - the same day-start-hour convention as `power`/`phases`,
-generalized to week/month/year. Six signals, same default-hidden-gross
-rule as `power`: **Imported/Exported** (hidden by default), **Net
-import** (purple), **Produced** (green), **Consumed** (firebrick),
-**Surplus** (gray) - all read straight from `aggregates.energy_totals()`
-per bucket. Unlike `power`/`phases`, the x-axis is categorical (bucket
+`--period {quarter_hour,hour,day,week,month,year}` (default `day`) sets
+the bucket size, `--count` how many buckets (defaults: 96 quarter-hours,
+24 hours, 30 days, 12 weeks, 12 months, 5 years - quarter_hour/hour both
+default to covering the last 24h, the same span as `power`'s own default
+day view, so they're directly comparable "bars instead of a line"
+alternatives to it). Buckets are calendar-aware (a "monthly" bucket spans
+that actual month, not a fixed 30 days) and end with whichever bucket
+"now" currently falls in - the same day-start-hour convention as
+`power`/`phases`, generalized to week/month/year (quarter_hour/hour ignore
+`day_start_hour` - meaningless once the bucket is smaller than a day -
+and align to the nearest local clock mark instead). Six signals, same
+default-hidden-gross rule as `power`: **Imported/Exported** (hidden by
+default), **Net import** (purple), **Produced** (green), **Consumed**
+(firebrick), **Surplus** (gray) - all read straight from
+`aggregates.energy_totals()` per bucket, so a `quarter_hour` trends chart
+is the most direct way to see the actual per-settlement-period
+Imported/Exported billing figures (see `aggregates.py`'s module docstring
+for why these aren't a plain gross total). Unlike `power`/`phases`, the
+x-axis is categorical (bucket
 labels), not a datetime axis - buckets of different periods aren't
 comparable in width.
 

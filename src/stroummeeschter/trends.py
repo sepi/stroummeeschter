@@ -14,19 +14,33 @@ from datetime import datetime, timedelta, timezone
 
 from stroummeeschter.chart import LOCAL_TZ
 
-PERIODS = ("day", "week", "month", "year")
+PERIODS = ("quarter_hour", "hour", "day", "week", "month", "year")
 
 # How many buckets to show by default, per period - enough to see a trend
 # without the bar chart turning into an unreadable wall of bars.
-DEFAULT_COUNT = {"day": 30, "week": 12, "month": 12, "year": 5}
+# quarter_hour/hour default to the last 24h (96 * 15min / 24 * 1h) - the
+# same span as the power chart's own default day view, just as bars instead
+# of a line, so the two are directly comparable "at a glance" alternatives.
+DEFAULT_COUNT = {"quarter_hour": 96, "hour": 24, "day": 30, "week": 12, "month": 12, "year": 5}
 
-_LABEL_FORMAT = {"day": "%b %d", "week": "%b %d", "month": "%b %Y", "year": "%Y"}
+_LABEL_FORMAT = {
+    "quarter_hour": "%b %d %H:%M",
+    "hour": "%b %d %H:%M",
+    "day": "%b %d",
+    "week": "%b %d",
+    "month": "%b %Y",
+    "year": "%Y",
+}
 
 
 def _step(dt: datetime, period: str, n: int) -> datetime:
     """Move a bucket-start `dt` forward/back by `n` buckets of `period`.
     Only ever called on actual bucket starts (day=1 for month/year), so the
     replace() calls below never land on an invalid day-of-month."""
+    if period == "quarter_hour":
+        return dt + timedelta(minutes=15 * n)
+    if period == "hour":
+        return dt + timedelta(hours=n)
     if period == "day":
         return dt + timedelta(days=n)
     if period == "week":
@@ -40,7 +54,15 @@ def _step(dt: datetime, period: str, n: int) -> datetime:
 
 
 def _current_bucket_start(period: str, day_start_hour: int, now_local: datetime) -> datetime:
-    if period == "day":
+    # quarter_hour/hour ignore day_start_hour entirely - that setting is
+    # about which local hour a *day* boundary falls on, meaningless once
+    # the bucket itself is smaller than a day; these just align to the
+    # nearest local clock mark instead.
+    if period == "quarter_hour":
+        start = now_local.replace(minute=(now_local.minute // 15) * 15, second=0, microsecond=0)
+    elif period == "hour":
+        start = now_local.replace(minute=0, second=0, microsecond=0)
+    elif period == "day":
         start = now_local.replace(hour=day_start_hour, minute=0, second=0, microsecond=0)
     elif period == "week":
         monday = now_local - timedelta(days=now_local.weekday())
